@@ -48,7 +48,36 @@ go install ./cmd/perpx-load-test
 
 ## Quick Start
 
-### 1. Seed Test Accounts
+### Option 1: Automated Benchmark Script (Recommended)
+
+The easiest way to run benchmarks is using the automated script that handles both seeding and load testing:
+
+```bash
+# Basic benchmark (10 workers, 30 seconds, 50 TPS per worker)
+./scripts/run_benchmark.sh
+
+# Higher load test
+./scripts/run_benchmark.sh --workers 20 --duration 60 --rate 100
+
+# Skip seeding if accounts are already funded
+./scripts/run_benchmark.sh --skip-seed --workers 50 --duration 120 --rate 200
+
+# Use TUI for real-time monitoring
+./scripts/run_benchmark.sh --tui --workers 10 --duration 60 --rate 100
+```
+
+The script automatically:
+- Checks if the localnet is running
+- Builds the binary (unless `--skip-build` is used)
+- Seeds test accounts (unless `--skip-seed` is used)
+- Runs the load test
+- Generates CSV and JSON results in `./exported/`
+
+See the [Automated Benchmark Script](#automated-benchmark-script) section for full documentation.
+
+### Option 2: Manual Commands
+
+#### 1. Seed Test Accounts
 
 Before running a load test, you need to fund the test accounts. The seed command creates and funds accounts for each worker:
 
@@ -71,7 +100,7 @@ The seed command will:
 - Fund accounts in batches via multi-message transactions
 - Verify all accounts are properly funded
 
-### 2. Run Load Test
+#### 2. Run Load Test
 
 Once accounts are seeded, run the load test:
 
@@ -100,6 +129,108 @@ perpx-load-test \
 ```
 
 ## Usage
+
+### Automated Benchmark Script
+
+The `run_benchmark.sh` script automates the entire benchmark process, from account seeding to running load tests and generating results. It's the recommended way to run benchmarks.
+
+#### Features
+
+- **Automatic Setup**: Builds binary, seeds accounts, and runs tests in one command
+- **Result Generation**: Automatically generates CSV and JSON result files
+- **Multiple Endpoints**: Supports testing against multiple RPC endpoints simultaneously
+- **UI Options**: Supports quiet mode, verbose logs, and full-screen TUI
+- **Error Handling**: Automatically detects and attempts to fix Go version mismatches
+
+#### Options
+
+| Option | Short | Description | Default |
+|--------|-------|-------------|---------|
+| `--workers` | `-w` | Number of workers (connections per endpoint) | `10` |
+| `--duration` | `-d` | Test duration in seconds | `30` |
+| `--rate` | `-r` | Transactions per second per worker | `50` |
+| `--skip-seed` | | Skip account seeding | `false` |
+| `--skip-build` | | Skip building the binary | `false` |
+| `--output-dir` | `-o` | Output directory for results | `./exported` |
+| `--seed-private-key` | `-p` | Hex-encoded private key for seeding | - |
+| `--seed-key` | `-k` | Key name or mnemonic for seeding | `alice` |
+| `--ws-endpoints` | | Comma-separated WebSocket endpoints | `ws://localhost:36657/websocket` |
+| `--quiet` | | Quiet UI (progress line only) | `true` |
+| `--verbose-logs` | | Stream full logs to terminal | `false` |
+| `--tui` | | Full-screen real-time TUI | `false` |
+| `--help` | `-h` | Show help message | - |
+
+#### Environment Variables
+
+All options can also be set via environment variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `WORKERS` | Number of workers | `10` |
+| `DURATION` | Test duration (seconds) | `30` |
+| `RATE` | TPS per worker | `50` |
+| `SKIP_SEED` | Skip seeding (`true`/`false`) | `false` |
+| `SKIP_BUILD` | Skip build (`true`/`false`) | `false` |
+| `OUTPUT_DIR` | Output directory | `./exported` |
+| `SEED_PRIVATE_KEY` | Hex-encoded private key | - |
+| `SEED_KEY` | Seed key/mnemonic | `alice` |
+| `CHAIN_ID` | Chain ID | `localperpxprotocol` |
+| `RPC_URL` | RPC endpoint | `http://localhost:36657` |
+| `WS_URL` | WebSocket endpoint | `ws://localhost:36657/websocket` |
+| `WS_ENDPOINTS` | Comma-separated WebSocket endpoints | `$WS_URL` |
+| `QUIET` | Quiet UI (`true`/`false`) | `true` |
+| `SHOW_LIVE_LOGS` | Stream logs (`true`/`false`) | `false` |
+| `UI_MODE` | UI mode (`plain`/`tui`) | `plain` |
+
+#### Examples
+
+```bash
+# Basic benchmark with defaults
+./scripts/run_benchmark.sh
+
+# High-throughput test
+./scripts/run_benchmark.sh --workers 20 --duration 120 --rate 200
+
+# Test against multiple endpoints
+WS_ENDPOINTS="ws://localhost:36657/websocket,ws://localhost:36658/websocket" \
+  ./scripts/run_benchmark.sh --workers 10 --duration 60
+
+# Use existing binary and skip seeding
+./scripts/run_benchmark.sh --skip-build --skip-seed --workers 50
+
+# Full-screen TUI for real-time monitoring
+./scripts/run_benchmark.sh --tui --workers 10 --duration 300 --rate 100
+
+# Verbose output with full logs
+./scripts/run_benchmark.sh --verbose-logs --workers 5 --duration 30
+
+# Custom output directory
+./scripts/run_benchmark.sh --output-dir ./my-results --workers 20
+```
+
+#### Output Files
+
+The script generates timestamped output files in the output directory:
+
+- `loadtest-stats-YYYYMMDD_HHMMSS.csv` - CSV statistics file
+- `loadtest-results-YYYYMMDD_HHMMSS.json` - JSON summary with configuration and results
+- `loadtest-run-YYYYMMDD_HHMMSS.log` - Full load test log
+- `loadtest-seed-YYYYMMDD_HHMMSS.log` - Account seeding log (if seeding was performed)
+
+#### Result Summary
+
+After completion, the script displays a summary including:
+- Configuration (workers, duration, rate, endpoints)
+- Execution metrics (start/end height, blocks processed, elapsed time)
+- Performance metrics (TPS, total transactions, efficiency)
+- File locations for detailed results
+
+#### Requirements
+
+- `curl` - For checking localnet status
+- `jq` - For parsing JSON results (optional, for JSON output)
+- `go` - For building the binary (unless `--skip-build` is used)
+- PerpX localnet running and accessible
 
 ### Seed Command
 
@@ -330,6 +461,32 @@ perpx-load-test seed --seed-key <mnemonic-with-funds>
 - Check network logs for errors
 - Ensure accounts are properly seeded
 
+#### Go Version Mismatch (Benchmark Script)
+
+**Problem**: Build fails with "version does not match go tool version" error.
+
+**Solution**: The script automatically attempts to fix this by cleaning caches and rebuilding. If automatic fix fails:
+```bash
+# Manual fix
+go clean -cache -modcache -testcache
+go install -a std
+
+# Or use existing binary
+./scripts/run_benchmark.sh --skip-build
+```
+
+#### Benchmark Script Can't Find Go
+
+**Problem**: Script reports "Cannot find Go binary".
+
+**Solution**: Ensure Go is installed and in PATH, or install it:
+```bash
+# Check if Go is installed
+which go
+
+# Install Go if needed (see https://go.dev/doc/install)
+```
+
 ## Development
 
 ### Project Structure
@@ -350,6 +507,8 @@ perpx-load-test/
 │       └── bank_send.go         # Bank send transaction strategy
 ├── internal/
 │   └── logging/                 # Logging utilities
+├── scripts/
+│   └── run_benchmark.sh         # Automated benchmark script
 ├── go.mod                       # Go module definition
 └── README.md                    # This file
 ```
