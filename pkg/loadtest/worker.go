@@ -7,7 +7,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/1119-Labs/perpx-chain/protocol/loadtest/internal/logging"
+	"github.com/1119-Labs/perpx-load-test/internal/logging"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )

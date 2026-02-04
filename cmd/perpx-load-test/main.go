@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/1119-Labs/perpx-chain/protocol/loadtest/pkg/loadtest"
-	"github.com/1119-Labs/perpx-chain/protocol/loadtest/pkg/client"
-	"github.com/1119-Labs/perpx-chain/protocol/loadtest/pkg/seed"
+	"github.com/1119-Labs/perpx-load-test/pkg/client"
+	"github.com/1119-Labs/perpx-load-test/pkg/loadtest"
+	"github.com/1119-Labs/perpx-load-test/pkg/seed"
 )
 
 func main() {

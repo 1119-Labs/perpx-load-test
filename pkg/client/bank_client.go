@@ -23,8 +23,8 @@ import (
 
 	"cosmossdk.io/math"
 	"github.com/1119-Labs/perpx-chain/protocol/app"
-	"github.com/1119-Labs/perpx-chain/protocol/loadtest/pkg/loadtest"
-	"github.com/1119-Labs/perpx-chain/protocol/loadtest/pkg/strategies"
+	"github.com/1119-Labs/perpx-load-test/pkg/loadtest"
+	"github.com/1119-Labs/perpx-load-test/pkg/strategies"
 )
 
 // PerpxBankClient implements loadtest.Client for PerpX bank send transactions

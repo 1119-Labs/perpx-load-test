@@ -649,6 +649,8 @@ github.com/1119-Labs/iavl v1.1.1-0.20240509161911-1c8b8e787e85 h1:fLog3PSpqnYBsj
 github.com/1119-Labs/iavl v1.1.1-0.20240509161911-1c8b8e787e85/go.mod h1:8xIUkgVvwvVrBu81scdPty+/Dx9GqwHnAvXz4cwF7RY=
 github.com/1119-Labs/ibc-go/v8 v8.0.0-rc.0.0.20250312180215-8733b3edf43a h1:GvU5Axdv5I9o0aABOnRr30WZ5o44QVqoVNxxJDCklm8=
 github.com/1119-Labs/ibc-go/v8 v8.0.0-rc.0.0.20250312180215-8733b3edf43a/go.mod h1:C6IiJom0F3cIQCD5fKwVPDrDK9j/xTu563AWuOmXois=
+github.com/1119-Labs/perpx-chain/protocol v0.0.0-20260126090022-57382c4c8623 h1:29MytIALrVr1eaMmS1/Z90cR1J5nHen8CSV3rX3B1Ok=
+github.com/1119-Labs/perpx-chain/protocol v0.0.0-20260126090022-57382c4c8623/go.mod h1:zXgygNUvt98VgOcW7ZqpWMzFU446WLlZmOxM7xH+MDo=
 github.com/1119-Labs/slinky v1.3.3 h1:zlYDDoGmudBaxQVCdDagyRDgEvVflBj7z/S5k0MRc44=
 github.com/1119-Labs/slinky v1.3.3/go.mod h1:2qif95ndj9WqLNnOJaAEYHrNw/tdgyejsl1yrkO4Jdg=
 github.com/99designs/go-keychain v0.0.0-20191008050251-8e49817e8af4 h1:/vQbFIOMbk2FiG/kXiLl8BRyzTWDw7gX/Hz7Dd5eDMs=

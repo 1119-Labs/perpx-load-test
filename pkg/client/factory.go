@@ -5,8 +5,8 @@ import (
 	"os"
 	"sync/atomic"
 
-	"github.com/1119-Labs/perpx-chain/protocol/loadtest/pkg/loadtest"
-	"github.com/1119-Labs/perpx-chain/protocol/loadtest/pkg/strategies"
+	"github.com/1119-Labs/perpx-load-test/pkg/loadtest"
+	"github.com/1119-Labs/perpx-load-test/pkg/strategies"
 )
 
 // PerpxBankClientFactory implements loadtest.ClientFactory for PerpX bank send transactions

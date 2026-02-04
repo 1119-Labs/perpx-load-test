@@ -1,4 +1,4 @@
-module github.com/1119-Labs/perpx-chain/protocol/loadtest
+module github.com/1119-Labs/perpx-load-test
 
 go 1.25.4
 
@@ -268,9 +268,6 @@ require (
 	rsc.io/tmplfunc v0.0.3 // indirect
 	sigs.k8s.io/yaml v1.4.0 // indirect
 )
-
-// Allow importing internal protocol packages from this repo checkout.
-replace github.com/1119-Labs/perpx-chain/protocol => ..
 
 // Block for dep upgrades that would have been pulled in via Slinky (copied from protocol/go.mod)
 replace (

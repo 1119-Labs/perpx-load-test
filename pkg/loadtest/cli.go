@@ -6,7 +6,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/1119-Labs/perpx-chain/protocol/loadtest/internal/logging"
+	"github.com/1119-Labs/perpx-load-test/internal/logging"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )

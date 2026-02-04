@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/1119-Labs/perpx-chain/protocol/loadtest/internal/logging"
+	"github.com/1119-Labs/perpx-load-test/internal/logging"
 )
 
 // peerInfo is returned when polling the CometBFT RPC endpoint.
