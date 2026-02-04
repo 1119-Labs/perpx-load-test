@@ -291,6 +291,18 @@ for cmd in curl jq go; do
 	fi
 done
 
+# Detect a timeout command (GNU coreutils `timeout` or Homebrew `gtimeout` on macOS).
+# If none is available, we will run benchmarks without an external timeout wrapper.
+TIMEOUT_CMD=""
+if command -v timeout >/dev/null 2>&1; then
+	TIMEOUT_CMD="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+	TIMEOUT_CMD="gtimeout"
+else
+	log_warning "No 'timeout' or 'gtimeout' command found; benchmarks will run without an automatic timeout."
+	log_warning "On macOS you can install it via: brew install coreutils (then 'gtimeout' will be available)."
+fi
+
 # Find system Go binary
 SYSTEM_GO=$(command -v go)
 if [ -z "$SYSTEM_GO" ] || [ ! -x "$SYSTEM_GO" ]; then
@@ -541,7 +553,7 @@ log_info "Running benchmark command..."
 log_info "  Command: $BINARY --ui $UI_MODE -c $WORKERS -T $DURATION -r $RATE -s 250 --broadcast-tx-method async --endpoints $WS_ENDPOINTS --stats-output $OUTPUT_FILE"
 log_info "  Logs: $LOG_FILE"
 
-# Run with timeout to prevent infinite hanging
+# Run with timeout to prevent infinite hanging (if timeout command is available)
 TIMEOUT_DURATION=$((DURATION + 60))
 
 if [ "$UI_MODE" = "tui" ]; then
@@ -558,21 +570,33 @@ if [ "$UI_MODE" = "tui" ]; then
 	fi
 	
 	# Run TUI in foreground - it will take over the terminal.
-	# IMPORTANT: use `timeout --foreground` so the TUI keeps control of the TTY.
-	# Without --foreground, GNU coreutils `timeout` may break fullscreen/interactive apps.
+	# If a timeout command is available, use it with --foreground so the TUI keeps control of the TTY.
+	# Without a timeout command, run directly (no automatic timeout).
 	# The TUI writes to stdout, so we don't redirect it; only redirect stderr to a log file.
-	# Use timeout to prevent infinite hanging, but allow normal completion.
 	set +e  # Don't exit on error, we'll check exit code manually
-	timeout --foreground "$TIMEOUT_DURATION" "$BINARY" \
-		--ui tui \
-		-c "$WORKERS" \
-		-T "$DURATION" \
-		-r "$RATE" \
-		-s 250 \
-		--broadcast-tx-method async \
-		--endpoints "$WS_ENDPOINTS" \
-		--stats-output "$OUTPUT_FILE" 2>"$LOG_FILE"
-	EXIT_CODE=$?
+	if [ -n "$TIMEOUT_CMD" ]; then
+		"$TIMEOUT_CMD" --foreground "$TIMEOUT_DURATION" "$BINARY" \
+			--ui tui \
+			-c "$WORKERS" \
+			-T "$DURATION" \
+			-r "$RATE" \
+			-s 250 \
+			--broadcast-tx-method async \
+			--endpoints "$WS_ENDPOINTS" \
+			--stats-output "$OUTPUT_FILE" 2>"$LOG_FILE"
+		EXIT_CODE=$?
+	else
+		"$BINARY" \
+			--ui tui \
+			-c "$WORKERS" \
+			-T "$DURATION" \
+			-r "$RATE" \
+			-s 250 \
+			--broadcast-tx-method async \
+			--endpoints "$WS_ENDPOINTS" \
+			--stats-output "$OUTPUT_FILE" 2>"$LOG_FILE"
+		EXIT_CODE=$?
+	fi
 	set -e  # Re-enable exit on error
 	
 	# Clear any remaining TUI output and restore cursor
@@ -586,15 +610,27 @@ elif [ "$QUIET" = "true" ] && [ "$SHOW_LIVE_LOGS" != "true" ]; then
 	log_info "Quiet mode enabled (set --verbose-logs to stream full logs)"
 
 	# Start benchmark in background and capture output to log file.
-	( timeout "$TIMEOUT_DURATION" "$BINARY" \
-		--ui "$UI_MODE" \
-		-c "$WORKERS" \
-		-T "$DURATION" \
-		-r "$RATE" \
-		-s 250 \
-		--broadcast-tx-method async \
-		--endpoints "$WS_ENDPOINTS" \
-		--stats-output "$OUTPUT_FILE" ) >"$LOG_FILE" 2>&1 &
+	if [ -n "$TIMEOUT_CMD" ]; then
+		( "$TIMEOUT_CMD" "$TIMEOUT_DURATION" "$BINARY" \
+			--ui "$UI_MODE" \
+			-c "$WORKERS" \
+			-T "$DURATION" \
+			-r "$RATE" \
+			-s 250 \
+			--broadcast-tx-method async \
+			--endpoints "$WS_ENDPOINTS" \
+			--stats-output "$OUTPUT_FILE" ) >"$LOG_FILE" 2>&1 &
+	else
+		( "$BINARY" \
+			--ui "$UI_MODE" \
+			-c "$WORKERS" \
+			-T "$DURATION" \
+			-r "$RATE" \
+			-s 250 \
+			--broadcast-tx-method async \
+			--endpoints "$WS_ENDPOINTS" \
+			--stats-output "$OUTPUT_FILE" ) >"$LOG_FILE" 2>&1 &
+	fi
 	BENCH_PID=$!
 
 	# Simple progress loop (updates every second).
@@ -613,20 +649,33 @@ elif [ "$QUIET" = "true" ] && [ "$SHOW_LIVE_LOGS" != "true" ]; then
 else
 	# Verbose logs: stream everything to terminal and also save to log file.
 	# `tee` preserves the exit code of the load test via PIPESTATUS[0].
-	timeout "$TIMEOUT_DURATION" "$BINARY" \
-		--ui "$UI_MODE" \
-		-c "$WORKERS" \
-		-T "$DURATION" \
-		-r "$RATE" \
-		-s 250 \
-		--broadcast-tx-method async \
-		--endpoints "$WS_ENDPOINTS" \
-		--stats-output "$OUTPUT_FILE" 2>&1 | tee "$LOG_FILE"
-	EXIT_CODE=${PIPESTATUS[0]}
+	if [ -n "$TIMEOUT_CMD" ]; then
+		"$TIMEOUT_CMD" "$TIMEOUT_DURATION" "$BINARY" \
+			--ui "$UI_MODE" \
+			-c "$WORKERS" \
+			-T "$DURATION" \
+			-r "$RATE" \
+			-s 250 \
+			--broadcast-tx-method async \
+			--endpoints "$WS_ENDPOINTS" \
+			--stats-output "$OUTPUT_FILE" 2>&1 | tee "$LOG_FILE"
+		EXIT_CODE=${PIPESTATUS[0]}
+	else
+		"$BINARY" \
+			--ui "$UI_MODE" \
+			-c "$WORKERS" \
+			-T "$DURATION" \
+			-r "$RATE" \
+			-s 250 \
+			--broadcast-tx-method async \
+			--endpoints "$WS_ENDPOINTS" \
+			--stats-output "$OUTPUT_FILE" 2>&1 | tee "$LOG_FILE"
+		EXIT_CODE=${PIPESTATUS[0]}
+	fi
 fi
 
 # Check exit code
-if [ $EXIT_CODE -eq 124 ]; then
+if [ -n "$TIMEOUT_CMD" ] && [ $EXIT_CODE -eq 124 ]; then
 	log_error "Benchmark timed out after $TIMEOUT_DURATION seconds"
 	if [ "$UI_MODE" = "tui" ]; then
 		log_info "TUI may have been running but exceeded timeout. Check log file: $LOG_FILE"
