@@ -80,6 +80,65 @@ log_warning() {
 	echo -e "${COLOR_WARNING}[WARN]${COLOR_RESET} $*" >&2
 }
 
+ws_to_http_base() {
+	# Convert ws://host:port/websocket (or wss://) to http(s)://host:port
+	# and strip any trailing /websocket path.
+	local ws="$1"
+	local http="$ws"
+	http="${http#ws://}"
+	http="http://${http#http://}"
+	if [[ "$ws" == wss://* ]]; then
+		http="${ws#wss://}"
+		http="https://${http#https://}"
+	fi
+	# Strip trailing /websocket if present
+	http="${http%/websocket}"
+	echo "$http"
+}
+
+validate_ws_endpoints_reachable() {
+	# Validate each ws endpoint by querying the corresponding HTTP RPC /status.
+	# This catches the common case where one of the provided endpoints isn't running,
+	# which otherwise causes perpx-load-test to exit with code 1 and little/no output in TUI mode.
+	local raw="$1"
+	local -a parts endpoints
+	local ep http_base
+	local failed=0
+
+	IFS=',' read -ra parts <<<"$raw"
+	endpoints=()
+	for ep in "${parts[@]}"; do
+		ep="${ep//[[:space:]]/}"
+		if [ -n "$ep" ]; then
+			endpoints+=("$ep")
+		fi
+	done
+
+	if [ "${#endpoints[@]}" -eq 0 ]; then
+		log_error "No WebSocket endpoints provided"
+		return 1
+	fi
+
+	log_info "Validating WebSocket endpoints..."
+	for ep in "${endpoints[@]}"; do
+		http_base="$(ws_to_http_base "$ep")"
+		# Try /status on the corresponding HTTP RPC endpoint.
+		if ! curl -fsS "${http_base}/status" >/dev/null 2>&1; then
+			log_error "Endpoint not reachable: $ep (RPC status check failed at ${http_base}/status)"
+			failed=1
+		else
+			log_success "Endpoint OK: $ep"
+		fi
+	done
+
+	if [ "$failed" -ne 0 ]; then
+		log_error "One or more endpoints are not reachable."
+		log_error "Fix: start the missing node(s), or remove them from WS_ENDPOINTS/--ws-endpoints."
+		return 1
+	fi
+	return 0
+}
+
 count_ws_endpoints() {
 	# Counts non-empty comma-separated endpoints in $1, stripping whitespace.
 	local raw="$1"
@@ -270,6 +329,11 @@ if ! curl -s "$RPC_URL/status" > /dev/null 2>&1; then
 	exit 1
 fi
 log_success "Localnet is running"
+
+# Validate all WebSocket endpoints are reachable before we seed + run load test.
+if ! validate_ws_endpoints_reachable "$WS_ENDPOINTS"; then
+	exit 1
+fi
 
 # Get chain info
 CHAIN_STATUS=$(curl -s "$RPC_URL/status")
@@ -484,7 +548,22 @@ if [ "$UI_MODE" = "tui" ]; then
 	# Full-screen TUI: run in foreground with stdout attached to terminal.
 	# Save stderr to a log file for debugging.
 	log_info "TUI mode enabled (full-screen realtime view)"
-	timeout "$TIMEOUT_DURATION" "$BINARY" \
+	log_info "Press Ctrl+C to stop the test early"
+	echo ""
+	
+	# Ensure we have a TTY for TUI to work properly
+	if [ ! -t 1 ]; then
+		log_warning "Warning: stdout is not a terminal. TUI may not display correctly."
+		log_warning "Consider running without --tui or ensure you're in an interactive terminal."
+	fi
+	
+	# Run TUI in foreground - it will take over the terminal.
+	# IMPORTANT: use `timeout --foreground` so the TUI keeps control of the TTY.
+	# Without --foreground, GNU coreutils `timeout` may break fullscreen/interactive apps.
+	# The TUI writes to stdout, so we don't redirect it; only redirect stderr to a log file.
+	# Use timeout to prevent infinite hanging, but allow normal completion.
+	set +e  # Don't exit on error, we'll check exit code manually
+	timeout --foreground "$TIMEOUT_DURATION" "$BINARY" \
 		--ui tui \
 		-c "$WORKERS" \
 		-T "$DURATION" \
@@ -494,6 +573,13 @@ if [ "$UI_MODE" = "tui" ]; then
 		--endpoints "$WS_ENDPOINTS" \
 		--stats-output "$OUTPUT_FILE" 2>"$LOG_FILE"
 	EXIT_CODE=$?
+	set -e  # Re-enable exit on error
+	
+	# Clear any remaining TUI output and restore cursor
+	# This ensures the terminal is in a good state after TUI exits
+	echo ""
+	tput cnorm 2>/dev/null || echo -e "\033[?25h"  # Show cursor
+	tput sgr0 2>/dev/null || echo -e "\033[0m"     # Reset colors
 elif [ "$QUIET" = "true" ] && [ "$SHOW_LIVE_LOGS" != "true" ]; then
 	# Quiet UI: show a single progress line, write full logs to a file.
 	# We also keep the last few lines on failure for quick debugging.
@@ -542,9 +628,15 @@ fi
 # Check exit code
 if [ $EXIT_CODE -eq 124 ]; then
 	log_error "Benchmark timed out after $TIMEOUT_DURATION seconds"
+	if [ "$UI_MODE" = "tui" ]; then
+		log_info "TUI may have been running but exceeded timeout. Check log file: $LOG_FILE"
+	fi
 	exit 1
 elif [ $EXIT_CODE -ne 0 ]; then
-	log_error "Benchmark failed with exit code $EXIT_CODE (see output above for details)"
+	log_error "Benchmark failed with exit code $EXIT_CODE"
+	if [ "$UI_MODE" = "tui" ]; then
+		log_error "TUI mode was enabled. Check the log file for errors: $LOG_FILE"
+	fi
 	log_error "Last 30 log lines:"
 	tail -30 "$LOG_FILE" 2>/dev/null || true
 	exit 1
