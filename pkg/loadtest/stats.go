@@ -14,25 +14,31 @@ type AggregateStats struct {
 	// Computed statistics
 	AvgTxRate   float64 // The rate at which transactions were submitted (tx/sec).
 	AvgDataRate float64 // The rate at which data was transmitted in transactions (bytes/sec).
+	AvgTxSize   float64 // The average size of each transaction (bytes/tx).
 }
 
 func (s *AggregateStats) String() string {
 	return fmt.Sprintf(
-		"AggregateStats{TotalTimeSeconds: %.3f, TotalTxs: %d, TotalBytes: %d, AvgTxRate: %.6f, AvgDataRate: %.6f}",
+		"AggregateStats{TotalTimeSeconds: %.3f, TotalTxs: %d, TotalBytes: %d, AvgTxRate: %.6f, AvgDataRate: %.6f, AvgTxSize: %.2f}",
 		s.TotalTimeSeconds,
 		s.TotalTxs,
 		s.TotalBytes,
 		s.AvgTxRate,
 		s.AvgDataRate,
+		s.AvgTxSize,
 	)
 }
 
 func (s *AggregateStats) Compute() {
 	s.AvgTxRate = 0
 	s.AvgDataRate = 0
+	s.AvgTxSize = 0
 	if s.TotalTimeSeconds > 0.0 {
 		s.AvgTxRate = float64(s.TotalTxs) / s.TotalTimeSeconds
 		s.AvgDataRate = float64(s.TotalBytes) / s.TotalTimeSeconds
+	}
+	if s.TotalTxs > 0 {
+		s.AvgTxSize = float64(s.TotalBytes) / float64(s.TotalTxs)
 	}
 }
 
@@ -54,6 +60,7 @@ func writeAggregateStats(filename string, stats AggregateStats) error {
 		{"total_bytes", fmt.Sprintf("%d", stats.TotalBytes), "bytes"},
 		{"avg_tx_rate", fmt.Sprintf("%.6f", stats.AvgTxRate), "transactions per second"},
 		{"avg_data_rate", fmt.Sprintf("%.6f", stats.AvgDataRate), "bytes per second"},
+		{"avg_tx_size", fmt.Sprintf("%.2f", stats.AvgTxSize), "bytes per transaction"},
 	}
 	return w.WriteAll(records)
 }

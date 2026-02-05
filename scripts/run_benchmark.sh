@@ -730,6 +730,7 @@ TOTAL_TXS="0"
 TOTAL_BYTES="0"
 AVG_TX_RATE="0"
 AVG_DATA_RATE="0"
+AVG_TX_SIZE="0"
 ATTEMPTED_TPS=$((WORKERS * RATE * ENDPOINT_COUNT))
 ATTEMPTED_TXS=$((ATTEMPTED_TPS * DURATION))
 BLOCKS_PROCESSED=$((END_HEIGHT - START_HEIGHT))
@@ -743,6 +744,7 @@ if [ -f "$OUTPUT_FILE" ]; then
 	TOTAL_BYTES=$(grep "total_bytes" "$OUTPUT_FILE" | cut -d',' -f2 || echo "0")
 	AVG_TX_RATE=$(grep "avg_tx_rate" "$OUTPUT_FILE" | cut -d',' -f2 || echo "0")
 	AVG_DATA_RATE=$(grep "avg_data_rate" "$OUTPUT_FILE" | cut -d',' -f2 || echo "0")
+	AVG_TX_SIZE=$(grep "avg_tx_size" "$OUTPUT_FILE" | cut -d',' -f2 || echo "0")
 
 	if [ "$BLOCKS_PROCESSED" -gt 0 ]; then
 		AVG_BLOCK_TIME=$(awk "BEGIN {printf \"%.3f\", $TOTAL_TIME / $BLOCKS_PROCESSED}")
@@ -759,6 +761,7 @@ if [ -f "$OUTPUT_FILE" ]; then
 	echo "  total_bytes:       $TOTAL_BYTES bytes"
 	echo "  avg_tx_rate:       $AVG_TX_RATE transactions per second"
 	echo "  avg_data_rate:     $AVG_DATA_RATE bytes per second"
+	echo "  avg_tx_size:       $AVG_TX_SIZE bytes per transaction"
 	echo "  actual_tps:        $AVG_TX_RATE (vs attempted $ATTEMPTED_TPS TPS, $EFFICIENCY% achieved)"
 	echo "  avg_block_time:    ${AVG_BLOCK_TIME}s (over $BLOCKS_PROCESSED blocks)"
 	echo "  txs_per_block:     $TXS_PER_BLOCK"
@@ -791,6 +794,7 @@ if command -v jq &> /dev/null && [ -f "$OUTPUT_FILE" ]; then
 		--arg total_bytes "$TOTAL_BYTES" \
 		--arg avg_tx_rate "$AVG_TX_RATE" \
 		--arg avg_data_rate "$AVG_DATA_RATE" \
+		--arg avg_tx_size "$AVG_TX_SIZE" \
 		--arg avg_block_time "$AVG_BLOCK_TIME" \
 		--arg txs_per_block "$TXS_PER_BLOCK" \
 		--arg attempted_tps "$ATTEMPTED_TPS" \
@@ -822,6 +826,7 @@ if command -v jq &> /dev/null && [ -f "$OUTPUT_FILE" ]; then
 				total_bytes: ($total_bytes | tonumber),
 				average_tps: ($avg_tx_rate | tonumber),
 				average_data_rate_bps: ($avg_data_rate | tonumber),
+				average_tx_size_bytes: ($avg_tx_size | tonumber),
 				average_block_time_seconds: ($avg_block_time | tonumber),
 				txs_per_block: ($txs_per_block | tonumber),
 				attempted_tps: ($attempted_tps | tonumber),
