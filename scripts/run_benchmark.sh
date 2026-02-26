@@ -553,8 +553,12 @@ log_info "Running benchmark command..."
 log_info "  Command: $BINARY --ui $UI_MODE -c $WORKERS -T $DURATION -r $RATE -s 250 --broadcast-tx-method async --endpoints $WS_ENDPOINTS --stats-output $OUTPUT_FILE"
 log_info "  Logs: $LOG_FILE"
 
-# Run with timeout to prevent infinite hanging (if timeout command is available)
-TIMEOUT_DURATION=$((DURATION + 60))
+# Run with timeout to prevent infinite hanging (if timeout command is available).
+# Connection setup scales with connection count; add buffer (1s per 50 connections, cap 20 min).
+TOTAL_CONNS=$((WORKERS * ENDPOINT_COUNT))
+CONN_BUFFER=$((TOTAL_CONNS / 50))
+[ "$CONN_BUFFER" -gt 1200 ] && CONN_BUFFER=1200
+TIMEOUT_DURATION=$((DURATION + 120 + CONN_BUFFER))
 
 if [ "$UI_MODE" = "tui" ]; then
 	# Full-screen TUI: run in foreground with stdout attached to terminal.

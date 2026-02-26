@@ -3,6 +3,7 @@ package client
 import (
 	"fmt"
 	"os"
+	"sync"
 	"sync/atomic"
 
 	"github.com/1119-Labs/perpx-load-test/pkg/loadtest"
@@ -11,9 +12,9 @@ import (
 
 // PerpxBankClientFactory implements loadtest.ClientFactory for PerpX bank send transactions
 type PerpxBankClientFactory struct {
-	// workerCounter assigns a unique, monotonically increasing ID to each
-	// client instance so that each worker derives a distinct key.
 	workerCounter int64
+	poolMu        sync.Mutex
+	receiverPool  []string // lazy-inited when LOADTEST_RECEIVER_POOL=many; same N as sender accounts so different senders → different receivers (no sequential tx bottleneck)
 }
 
 // Ensure PerpxBankClientFactory implements ClientFactory
@@ -40,22 +41,32 @@ func (f *PerpxBankClientFactory) ValidateConfig(cfg loadtest.Config) error {
 
 // NewClient creates a new PerpX bank client
 func (f *PerpxBankClientFactory) NewClient(cfg loadtest.Config) (loadtest.Client, error) {
-	// Get chain configuration from environment or use defaults
 	chainID := getEnv("LOADTEST_CHAIN_ID", "localperpxprotocol")
 	denom := getEnv("LOADTEST_DENOM", "aperpx")
-	sinkAddr := getEnv("LOADTEST_SINK_ADDRESS", "perpx1kyfmupa8z5jtxgf5f4gt285sepeg6eqnzvs25m") // Faucet address
+	sinkAddr := getEnv("LOADTEST_SINK_ADDRESS", "perpx1kyfmupa8z5jtxgf5f4gt285sepeg6eqnzvs25m")
 	seedKey := getEnv("LOADTEST_SEED_KEY", "")
 
-	// Create bank send strategy
-	strategy, err := strategies.NewBankSendStrategy(chainID, denom, sinkAddr)
+	// Lazy-init receiver pool when LOADTEST_RECEIVER_POOL=many so different senders send to different receivers (no sequential execution dependency)
+	var receiverPool []string
+	if getEnv("LOADTEST_RECEIVER_POOL", "") == "many" {
+		f.poolMu.Lock()
+		if len(f.receiverPool) == 0 {
+			N := cfg.Connections * len(cfg.Endpoints)
+			f.receiverPool = make([]string, N)
+			for i := 0; i < N; i++ {
+				f.receiverPool[i] = DeriveBenchAddress(i)
+			}
+		}
+		receiverPool = f.receiverPool
+		f.poolMu.Unlock()
+	}
+
+	strategy, err := strategies.NewBankSendStrategy(chainID, denom, sinkAddr, receiverPool)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bank send strategy: %w", err)
 	}
 
-	// Assign a unique worker ID for this client so each worker uses a distinct account.
 	workerID := atomic.AddInt64(&f.workerCounter, 1) - 1
-
-	// Create client with strategy and worker ID
 	client, err := NewPerpxBankClient(cfg, strategy, seedKey, int(workerID))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create PerpX bank client: %w", err)
