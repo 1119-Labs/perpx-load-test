@@ -107,6 +107,24 @@ func runPrintLoadtest(cmd *cobra.Command, _ []string) error {
 			fmt.Printf("RPC_URL=%s\n", rpcURL)
 		}
 	}
+
+	// Expose CHAIN_ID so scripts can honour YAML-driven chain IDs instead of
+	// always inferring them from RPC /status.
+	//
+	// Preference order:
+	//   1. loadtest.chainId
+	//   2. seed.chainId
+	if v.IsSet(loadtestConfigPrefix + "chainId") {
+		chainID := v.GetString(loadtestConfigPrefix + "chainId")
+		if chainID != "" {
+			fmt.Printf("CHAIN_ID=%s\n", chainID)
+		}
+	} else if v.IsSet("seed.chainId") {
+		chainID := v.GetString("seed.chainId")
+		if chainID != "" {
+			fmt.Printf("CHAIN_ID=%s\n", chainID)
+		}
+	}
 	return nil
 }
 

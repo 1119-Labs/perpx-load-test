@@ -339,7 +339,7 @@ if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
 						[ "$DURATION_EXPLICIT" != "true" ] && eval "$line"
 						;;
 					REST_URL=*)
-						# Always accept REST_URL from config; we map it to LOADTEST_REST_URL below
+						# Always accept REST_URL from config; we map it to LOADTEST_REST_URL below.
 						eval "$line"
 						;;
 					WS_URL=*)
@@ -350,8 +350,12 @@ if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
 						# Only take RPC_URL from config when LOADTEST_RPC/env wasn't set.
 						[ -z "$RPC_URL" ] && eval "$line"
 						;;
+					CHAIN_ID=*)
+						# Honor CHAIN_ID from config when LOADTEST_CHAIN_ID/env wasn't set.
+						[ -z "$CHAIN_ID" ] && eval "$line"
+						;;
 					SEED_WORKERS=*)
-						# Capture SEED_WORKERS from config; we may map it to WORKERS below
+						# Capture SEED_WORKERS from config; we may map it to WORKERS below.
 						eval "$line"
 						;;
 				esac
