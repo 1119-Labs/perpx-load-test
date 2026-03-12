@@ -63,12 +63,20 @@ func (g *TransactorGroup) Add(remoteAddr string, config *Config) error {
 const addAllConcurrency = 500
 
 func (g *TransactorGroup) AddAll(cfg *Config) error {
-	// Build (endpoint, config) list in the same order as sequential AddAll.
-	type job struct{ remoteAddr string }
+	// Build (endpoint, connection, config) list in the same order as sequential AddAll.
+	type job struct {
+		remoteAddr      string
+		endpointOrdinal int
+		connIndex       int
+	}
 	var jobs []job
-	for _, endpoint := range cfg.Endpoints {
+	for e, endpoint := range cfg.Endpoints {
 		for c := 0; c < cfg.Connections; c++ {
-			jobs = append(jobs, job{remoteAddr: endpoint})
+			jobs = append(jobs, job{
+				remoteAddr:      endpoint,
+				endpointOrdinal: e,
+				connIndex:       c,
+			})
 		}
 	}
 	if len(jobs) == 0 {
@@ -89,7 +97,13 @@ func (g *TransactorGroup) AddAll(cfg *Config) error {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			results[i].t, results[i].err = NewTransactor(jobs[i].remoteAddr, cfg)
+			// Build a per-job config copy with deterministic endpoint/connection identity.
+			job := jobs[i]
+			jobCfg := *cfg
+			jobCfg.EndpointOrdinal = job.endpointOrdinal
+			jobCfg.TransactorIndex = job.connIndex
+			// WorkersTotal and WorkersPerConnection are derived in ConfigFromViper when possible.
+			results[i].t, results[i].err = NewTransactor(job.remoteAddr, &jobCfg)
 		}(i)
 	}
 	wg.Wait()

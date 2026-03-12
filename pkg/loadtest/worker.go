@@ -252,6 +252,16 @@ func (w *Worker) executeLoadTest() error {
 	}
 	tg.SetProgressCallback(workerUpdateInterval, w.reportProgress)
 
+	// All websocket connections for this worker are now established.
+	totalEndpoints := len(cfg.Endpoints)
+	totalConnections := cfg.Connections * totalEndpoints
+	w.logger.Info(
+		"All WebSocket connections established",
+		"endpoints", totalEndpoints,
+		"connections_per_endpoint", cfg.Connections,
+		"total_connections", totalConnections,
+	)
+
 	w.logger.Info("Initiating load test")
 	tg.Start()
 
