@@ -1,0 +1,50 @@
+# PerpX Load Test - Localnet Configuration
+# Use with: perpx-load-test seed --config config/config-localnet.yaml
+# Or: ./scripts/run_benchmark.sh --config config/config-localnet.yaml
+#
+# Standard localnet (`perpx-chain/deployment/localnet`)
+# - RPC:  http://localhost:36657
+# - WS:   ws://localhost:36657/websocket
+# - REST: http://localhost:31317
+# - gRPC: http://localhost:39090 (maps to container :9090)
+
+version: "1"
+
+seed:
+  workers: 30000
+  seedKey: ""
+  # Optional: hex-encoded private key for seeding. If set, overrides seedKey.
+  seedPrivateKey: ""
+  rpc: http://localhost:36657
+  # REST base URL for balance/account queries (required for seed balance check).
+  # In the localnet stack, REST is exposed on localhost:31317.
+  restUrl: http://localhost:31317
+  # gRPC endpoint used for broadcasting seed transactions (host:port).
+  # In the localnet stack, gRPC is exposed on localhost:39090.
+  grpc: http://localhost:39090
+  chainId: localperpxprotocol
+  denom: aperpx
+  fundAmount: "1000000000000000000aperpx"
+  batchSize: 200
+  mode: bank
+
+loadtest:
+  clientFactory: perpx-bank
+  # REST base URL for account/sequence queries and optional tx status checks.
+  # In the localnet stack, REST is exposed on localhost:31317.
+  restUrl: http://localhost:31317
+  connections: 300
+  time: 30
+  sendPeriod: 1
+  rate: 200
+  count: -1
+  broadcastTxMethod: sync
+  # Explicit chain context for the bank/perps clients. If unset, code falls
+  # back to LOADTEST_CHAIN_ID / LOADTEST_DENOM env vars (which default to
+  # these same values for localnet).
+  chainId: localperpxprotocol
+  denom: aperpx
+  endpoints:
+    - ws://localhost:36657/websocket
+  ui: plain
+  statsOutputFile: ""
