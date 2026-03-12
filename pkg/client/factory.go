@@ -2,7 +2,7 @@ package client
 
 import (
 	"fmt"
-	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -39,45 +39,57 @@ func (f *PerpxBankClientFactory) ValidateConfig(cfg loadtest.Config) error {
 	return nil
 }
 
-// NewClient creates a new PerpX bank client
+// NewClient creates a new PerpX bank client. All config comes from cfg (Viper: YAML, env, CLI); code defaults only when still empty.
 func (f *PerpxBankClientFactory) NewClient(cfg loadtest.Config) (loadtest.Client, error) {
-	chainID := getEnv("LOADTEST_CHAIN_ID", "localperpxprotocol")
-	denom := getEnv("LOADTEST_DENOM", "aperpx")
-	sinkAddr := getEnv("LOADTEST_SINK_ADDRESS", "perpx1kyfmupa8z5jtxgf5f4gt285sepeg6eqnzvs25m")
-	seedKey := getEnv("LOADTEST_SEED_KEY", "")
-
-	// Lazy-init receiver pool when LOADTEST_RECEIVER_POOL=many so different senders send to different receivers (no sequential execution dependency)
-	var receiverPool []string
-	if getEnv("LOADTEST_RECEIVER_POOL", "") == "many" {
-		f.poolMu.Lock()
-		if len(f.receiverPool) == 0 {
-			N := cfg.Connections * len(cfg.Endpoints)
-			f.receiverPool = make([]string, N)
-			for i := 0; i < N; i++ {
-				f.receiverPool[i] = DeriveBenchAddress(i)
-			}
-		}
-		receiverPool = f.receiverPool
-		f.poolMu.Unlock()
+	chainID := strings.TrimSpace(cfg.ChainID)
+	if chainID == "" {
+		return nil, fmt.Errorf("chain ID is required")
 	}
-
-	strategy, err := strategies.NewBankSendStrategy(chainID, denom, sinkAddr, receiverPool)
+	denom := strings.TrimSpace(cfg.Denom)
+	if denom == "" {
+		return nil, fmt.Errorf("denom is required")
+	}
+	strategy, err := strategies.NewBankSendStrategy(chainID, denom)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bank send strategy: %w", err)
 	}
 
+	// If worker sharding is configured, derive worker ranges deterministically
+	// from EndpointOrdinal / TransactorIndex instead of using an atomic counter.
+	if cfg.WorkersTotal > 0 && cfg.WorkersPerConnection > 0 && len(cfg.Endpoints) > 0 && cfg.Connections > 0 {
+		E := len(cfg.Endpoints)
+		C := cfg.Connections
+		G := cfg.WorkersPerConnection
+		if cfg.EndpointOrdinal < 0 || cfg.EndpointOrdinal >= E {
+			return nil, fmt.Errorf("invalid EndpointOrdinal %d (expected 0..%d)", cfg.EndpointOrdinal, E-1)
+		}
+		if cfg.TransactorIndex < 0 || cfg.TransactorIndex >= C {
+			return nil, fmt.Errorf("invalid TransactorIndex %d (expected 0..%d)", cfg.TransactorIndex, C-1)
+		}
+		globalConnIndex := cfg.EndpointOrdinal*C + cfg.TransactorIndex
+		workerBase := globalConnIndex * G
+		connectionIndex := globalConnIndex
+		workersPerConnection := G
+
+		client, err := NewPerpxBankClient(cfg, strategy, workerBase, connectionIndex, workersPerConnection)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create deterministic PerpX bank client: %w", err)
+		}
+		return client, nil
+	}
+
+	// Fallback: legacy mapping using an atomic worker counter and treating each
+	// endpoint as a "worker" slot for connectionIndex derivation.
 	workerID := atomic.AddInt64(&f.workerCounter, 1) - 1
-	client, err := NewPerpxBankClient(cfg, strategy, seedKey, int(workerID))
+	workersPerConnection := len(cfg.Endpoints)
+	if workersPerConnection <= 0 {
+		workersPerConnection = 1
+	}
+	connectionIndex := int(workerID) / workersPerConnection
+
+	client, err := NewPerpxBankClient(cfg, strategy, int(workerID), connectionIndex, workersPerConnection)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create PerpX bank client: %w", err)
 	}
-
 	return client, nil
-}
-
-func getEnv(key, defaultValue string) string {
-	if val := os.Getenv(key); val != "" {
-		return val
-	}
-	return defaultValue
 }
