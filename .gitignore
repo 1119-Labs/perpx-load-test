@@ -1,2 +1,5 @@
 /bin
 /exported
+/.serena
+/.cursor
+/config/localnet-dev/
