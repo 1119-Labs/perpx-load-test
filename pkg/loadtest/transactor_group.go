@@ -59,13 +59,70 @@ func (g *TransactorGroup) Add(remoteAddr string, config *Config) error {
 	return nil
 }
 
+// addAllConcurrency limits how many connections we open in parallel (avoids overwhelming the server).
+const addAllConcurrency = 500
+
 func (g *TransactorGroup) AddAll(cfg *Config) error {
-	for _, endpoint := range cfg.Endpoints {
+	// Build (endpoint, connection, config) list in the same order as sequential AddAll.
+	type job struct {
+		remoteAddr      string
+		endpointOrdinal int
+		connIndex       int
+	}
+	var jobs []job
+	for e, endpoint := range cfg.Endpoints {
 		for c := 0; c < cfg.Connections; c++ {
-			if err := g.Add(endpoint, cfg); err != nil {
-				return err
-			}
+			jobs = append(jobs, job{
+				remoteAddr:      endpoint,
+				endpointOrdinal: e,
+				connIndex:       c,
+			})
 		}
+	}
+	if len(jobs) == 0 {
+		return nil
+	}
+
+	// Run NewTransactor in parallel with bounded concurrency so 16k connections don't take 16k * dial time.
+	type result struct {
+		t   *Transactor
+		err error
+	}
+	results := make([]result, len(jobs))
+	sem := make(chan struct{}, addAllConcurrency)
+	var wg sync.WaitGroup
+	for i := range jobs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			// Build a per-job config copy with deterministic endpoint/connection identity.
+			job := jobs[i]
+			jobCfg := *cfg
+			jobCfg.EndpointOrdinal = job.endpointOrdinal
+			jobCfg.TransactorIndex = job.connIndex
+			// WorkersTotal and WorkersPerConnection are derived in ConfigFromViper when possible.
+			results[i].t, results[i].err = NewTransactor(job.remoteAddr, &jobCfg)
+		}(i)
+	}
+	wg.Wait()
+
+	// Append in order and wire progress callbacks; on first error close any transactors we created.
+	for i := range results {
+		r := &results[i]
+		if r.err != nil {
+			for j := range results {
+				if results[j].t != nil {
+					results[j].t.close()
+				}
+			}
+			return r.err
+		}
+		id := len(g.transactors)
+		r.t.SetProgressCallback(id, g.getProgressCallbackInterval()/2, g.trackTransactorProgress)
+		g.transactors = append(g.transactors, r.t)
+		g.logger.Debug("Added transactor", "remoteAddr", jobs[i].remoteAddr)
 	}
 	return nil
 }

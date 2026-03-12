@@ -3,11 +3,8 @@ package client
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,16 +24,43 @@ import (
 	"github.com/1119-Labs/perpx-load-test/pkg/strategies"
 )
 
+// sharedHTTPClient is reused for all REST account queries to avoid per-call
+// allocations and enable connection pooling across requests.
+var sharedHTTPClient = &http.Client{Timeout: 10 * time.Second}
+
 // PerpxBankClient implements loadtest.Client for PerpX bank send transactions
 type PerpxBankClient struct {
 	config   loadtest.Config
 	strategy *strategies.BankSendStrategy
 
-	// Account information
+	// Account information for this client's primary worker-bound account.
 	privKey    cryptotypes.PrivKey
 	addr       sdk.AccAddress
 	accountNum uint64
 	sequence   uint64 // Local sequence counter (atomic)
+
+	// Worker/connection mapping metadata.
+	// workerIndex is the global worker index (0-based) for this client. It
+	// determines the bench key/address for the primary account.
+	workerIndex int
+	// connectionIndex is the 0-based index of the connection this client
+	// belongs to within its endpoint's connection set.
+	connectionIndex int
+	// workersPerConnection is the number of logical workers assigned to each
+	// connection across the entire worker set.
+	workersPerConnection int
+	// perConnectionRate is the configured tx/s rate for this connection.
+	perConnectionRate int
+	// txCounter is a monotonically increasing counter used to derive the
+	// (second, j) indices for the worker/connection mapping.
+	txCounter uint64
+
+	// lastSenderIdx/lastSender track which sender account produced the most
+	// recently generated sequenced tx. This allows CommitSequence / sequence
+	// recovery to apply to the correct underlying sender.
+	lastSenderMtx sync.Mutex
+	lastSenderIdx int
+	lastBench     *benchSender // non-nil when lastSenderIdx != workerIndex
 
 	// Encoding config
 	encCfg app.EncodingConfig
@@ -52,79 +76,45 @@ var _ loadtest.Client = (*PerpxBankClient)(nil)
 
 // NewPerpxBankClient creates a new PerpX bank client.
 // The id is a per-worker identifier used to derive a unique account key.
-func NewPerpxBankClient(cfg loadtest.Config, strategy *strategies.BankSendStrategy, seedKey string, id int) (*PerpxBankClient, error) {
+// connIndex and workersPerConn define the worker/connection mapping.
+func NewPerpxBankClient(cfg loadtest.Config, strategy *strategies.BankSendStrategy, id int, connIndex int, workersPerConn int) (*PerpxBankClient, error) {
 	encCfg := app.GetEncodingConfig()
 
 	// Use the provided worker id so each worker gets a distinct account.
 	workerID := id
 
-	// Generate deterministic key for this worker (similar to regen_genesis_addresses.go)
-	seedStr := fmt.Sprintf("bench worker %d seed phrase for load testing account", workerID)
-	seed := sha256.Sum256([]byte(seedStr))
-	// Use worker ID as path for additional determinism
-	adjustedSeed := sha256.Sum256(append(seed[:], byte(workerID)))
-	privKeyBytes, _ := btcec.PrivKeyFromBytes(adjustedSeed[:])
-	privKey := &secp256k1.PrivKey{Key: privKeyBytes.Serialize()}
-	addr := sdk.AccAddress(privKey.PubKey().Address())
+	// Generate deterministic key and address for this worker
+	privKey, addr := GenerateDeterministicKeyAndAddress(workerID)
 
-	// Connect to gRPC endpoint (use first endpoint, convert ws:// to http://)
-	rpcEndpoint := cfg.Endpoints[0]
-	if len(rpcEndpoint) > 0 {
-		// Convert ws://localhost:36657/websocket to http://localhost:36657
-		rpcEndpoint = convertWebSocketToHTTP(rpcEndpoint)
-		// Ensure we remove any trailing /websocket path that might remain
-		rpcEndpoint = strings.TrimSuffix(rpcEndpoint, "/websocket")
-		// Replace 127.0.0.1 with localhost to match seed.go behavior
-		rpcEndpoint = strings.Replace(rpcEndpoint, "127.0.0.1", "localhost", -1)
-	} else {
-		rpcEndpoint = "http://localhost:36657"
-	}
-
-	// Convert RPC port to gRPC port (36657 -> 39090, 26657 -> 9090)
-	grpcAddr := rpcEndpoint
-	if len(grpcAddr) > 7 && grpcAddr[:7] == "http://" {
-		grpcAddr = grpcAddr[7:]
-	}
-	// Replace RPC port with gRPC port
-	if strings.Contains(grpcAddr, ":36657") {
-		grpcAddr = strings.Replace(grpcAddr, ":36657", ":39090", 1)
-	} else if strings.Contains(grpcAddr, ":26657") {
-		grpcAddr = strings.Replace(grpcAddr, ":26657", ":9090", 1)
-	} else if !strings.Contains(grpcAddr, ":") {
-		// Default to gRPC port if no port specified
-		grpcAddr = "localhost:39090"
-	}
-
-	// Use REST API for account queries (more reliable than gRPC, avoids frame size issues)
-	// Convert RPC URL to REST API URL (same logic as seed.go)
-	restURL := strings.Replace(rpcEndpoint, ":36657", ":31317", 1)
-	if !strings.Contains(restURL, ":31317") {
-		// If port wasn't 36657, try to infer REST port or use default
-		restURL = strings.Replace(rpcEndpoint, ":26657", ":1317", 1)
-		if !strings.Contains(restURL, ":1317") {
-			// Default to localhost:31317 if we can't determine
-			restURL = "http://localhost:31317"
-		}
+	// REST base URL comes from config only (Viper: YAML, env, CLI). Fallback: derive from first WebSocket endpoint.
+	restURL := strings.TrimSpace(cfg.RESTURL)
+	if restURL == "" && len(cfg.Endpoints) > 0 && cfg.Endpoints[0] != "" {
+		restURL = convertWebSocketToHTTP(cfg.Endpoints[0])
 	}
 
 	// Initialize client without querying account (lazy initialization)
 	// This avoids blocking during initialization, which happens before WebSocket connection
 	client := &PerpxBankClient{
-		config:         cfg,
-		strategy:       strategy,
-		privKey:        privKey,
-		addr:           addr,
-		accountNum:     0, // Will be queried lazily
-		sequence:       0, // Will be queried lazily
-		encCfg:         encCfg,
-		accountQueried: false,
-		restURL:        restURL,
+		config:               cfg,
+		strategy:             strategy,
+		privKey:              privKey,
+		addr:                 addr,
+		accountNum:           0, // Will be queried lazily
+		sequence:             0, // Will be queried lazily
+		encCfg:               encCfg,
+		accountQueried:       false,
+		restURL:              restURL,
+		workerIndex:          workerID,
+		connectionIndex:      connIndex,
+		workersPerConnection: workersPerConn,
+		perConnectionRate:    cfg.Rate,
+		txCounter:            0,
 	}
 
 	return client, nil
 }
 
-// ensureAccountQueried queries account info if not already queried (lazy initialization)
+// ensureAccountQueried queries account info if not already queried (lazy initialization).
 func (c *PerpxBankClient) ensureAccountQueried() error {
 	c.accountQueryMtx.Lock()
 	defer c.accountQueryMtx.Unlock()
@@ -133,71 +123,219 @@ func (c *PerpxBankClient) ensureAccountQueried() error {
 		return nil
 	}
 
-	// Query account info via REST API (same approach as seed.go)
-	accountURL := fmt.Sprintf("%s/cosmos/auth/v1beta1/accounts/%s", c.restURL, c.addr.String())
-
-	var accountResp struct {
-		Account struct {
-			Type    string `json:"@type"`
-			Address string `json:"address"`
-			PubKey  *struct {
-				Type string `json:"@type"`
-				Key  string `json:"key"`
-			} `json:"pub_key"`
-			AccountNumber string `json:"account_number"`
-			Sequence      string `json:"sequence"`
-		} `json:"account"`
-	}
-
-	// Use a simple HTTP client with timeout (same approach as seed.go)
-	httpClient := &http.Client{Timeout: 10 * time.Second}
-	resp, err := httpClient.Get(accountURL)
+	info, err := QueryAccountInfo(c.restURL, c.addr.String(), sharedHTTPClient)
 	if err != nil {
-		return fmt.Errorf("failed to query account via REST API at %s (account %s may not exist - run 'seed' command first): %w", accountURL, c.addr.String(), err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("failed to query account: HTTP %d: %s (account %s may not exist - run 'seed' command first)", resp.StatusCode, string(body), c.addr.String())
+		return err
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&accountResp); err != nil {
-		return fmt.Errorf("failed to decode account response: %w", err)
-	}
-
-	// Parse account number and sequence
-	accountNum, err := strconv.ParseUint(accountResp.Account.AccountNumber, 10, 64)
-	if err != nil {
-		return fmt.Errorf("failed to parse account number: %w", err)
-	}
-	sequence, err := strconv.ParseUint(accountResp.Account.Sequence, 10, 64)
-	if err != nil {
-		return fmt.Errorf("failed to parse sequence: %w", err)
-	}
-
-	c.accountNum = accountNum
-	c.sequence = sequence
+	c.accountNum = info.AccountNumber
+	atomic.StoreUint64(&c.sequence, info.Sequence)
 	c.accountQueried = true
 
 	return nil
 }
 
-// GenerateTx generates a bank send transaction
+// benchSender holds cached metadata for a bench-derived sender account used
+// by the worker/connection mapping so we don't have to re-derive keys or
+// re-query account info for every transaction.
+type benchSender struct {
+	// seq is the local sequence counter for this sender. It is initialized from
+	// the on-chain sequence and then incremented atomically per generated tx.
+	seq uint64
+
+	priv        cryptotypes.PrivKey
+	addr        sdk.AccAddress
+	accountNum  uint64
+	initialized bool
+}
+
+var (
+	benchSendersMu sync.RWMutex
+	benchSenders   = make(map[int]*benchSender)
+)
+
+// benchAddrs caches derived bench addresses for receiver indices so we don't
+// have to redo the relatively expensive hashing/EC key derivation on every
+// transaction when selecting a receiver.
+var (
+	benchAddrsMu sync.RWMutex
+	benchAddrs   = make(map[int]string)
+)
+
+// connectionRange returns the [start, end) global worker index range owned by
+// this client's connection.
+func (c *PerpxBankClient) connectionRange() (start, end int) {
+	if c.workersPerConnection <= 0 {
+		return 0, 0
+	}
+	start = c.connectionIndex * c.workersPerConnection
+	end = start + c.workersPerConnection
+	return start, end
+}
+
+// senderReceiverIndices computes the global sender and receiver worker indices
+// for logical second t and per-second tx index j
+func (c *PerpxBankClient) senderReceiverIndices(t uint64, j int) (senderIdx, receiverIdx int) {
+	_, end := c.connectionRange()
+	if c.workersPerConnection <= 0 || end == 0 || c.perConnectionRate <= 0 {
+		// Fallback to this client's own worker index for both sender and receiver
+		// if mapping parameters are not initialized.
+		return c.workerIndex, c.workerIndex
+	}
+
+	wConn := c.workersPerConnection
+	connStart := c.connectionIndex * wConn
+
+	base := int((2 * uint64(c.perConnectionRate) * t) % uint64(wConn))
+	sLocal := (base + j) % wConn
+	rLocal := (base + c.perConnectionRate + j) % wConn
+
+	return connStart + sLocal, connStart + rLocal
+}
+
+// deriveBenchKey derives a deterministic bench private key and address for the
+// given integer index. This matches the scheme used by seed.go and
+// DeriveBenchAddress so that indices line up with pre-funded accounts.
+func deriveBenchKey(index int) (cryptotypes.PrivKey, sdk.AccAddress) {
+	seedStr := fmt.Sprintf("bench worker %d seed phrase for load testing account", index)
+	seed := sha256.Sum256([]byte(seedStr))
+	adjustedSeed := sha256.Sum256(append(seed[:], byte(index)))
+	privKeyBytes, _ := btcec.PrivKeyFromBytes(adjustedSeed[:])
+	privKey := &secp256k1.PrivKey{Key: privKeyBytes.Serialize()}
+	addr := sdk.AccAddress(privKey.PubKey().Address())
+	return privKey, addr
+}
+
+// getBenchAddress returns a cached bench address for the given index,
+// deriving it once via DeriveBenchAddress on first use.
+func getBenchAddress(index int) string {
+	benchAddrsMu.RLock()
+	addr, ok := benchAddrs[index]
+	benchAddrsMu.RUnlock()
+	if ok {
+		return addr
+	}
+
+	benchAddrsMu.Lock()
+	defer benchAddrsMu.Unlock()
+
+	// Another goroutine may have populated the cache while we were waiting.
+	if addr, ok = benchAddrs[index]; ok {
+		return addr
+	}
+
+	addr = DeriveBenchAddress(index)
+	benchAddrs[index] = addr
+	return addr
+}
+
+// getOrInitBenchSender returns a cached benchSender for the given index,
+// initializing it (including on-chain account lookup) on first use.
+func getOrInitBenchSender(index int, restURL string) (*benchSender, error) {
+	benchSendersMu.RLock()
+	s, ok := benchSenders[index]
+	initialized := false
+	if ok {
+		initialized = s.initialized
+	}
+	benchSendersMu.RUnlock()
+
+	if !ok {
+		benchSendersMu.Lock()
+		s, ok = benchSenders[index]
+		if !ok {
+			priv, addr := deriveBenchKey(index)
+			s = &benchSender{
+				priv: priv,
+				addr: addr,
+			}
+			benchSenders[index] = s
+		}
+		initialized = s.initialized
+		benchSendersMu.Unlock()
+	}
+
+	if initialized {
+		return s, nil
+	}
+
+	// First-time initialization: query on-chain account metadata.
+	info, err := QueryAccountInfo(restURL, s.addr.String(), sharedHTTPClient)
+	if err != nil {
+		return nil, err
+	}
+
+	benchSendersMu.Lock()
+	// Another goroutine may have initialized this sender while we were querying.
+	if !s.initialized {
+		s.accountNum = info.AccountNumber
+		s.seq = info.Sequence
+		s.initialized = true
+	}
+	benchSendersMu.Unlock()
+
+	return s, nil
+}
+
+// GenerateTx generates a bank send transaction using the worker/connection
 func (c *PerpxBankClient) GenerateTx() ([]byte, error) {
-	// Ensure account info is queried (lazy initialization)
+	// For sync/commit broadcast modes, the transactor will prefer the sequenced
+	// GenerateTxWithSequence path below when available. Keep GenerateTx for
+	// async mode and backwards compatibility.
+	// Ensure account info is queried (lazy initialization) for this client's
+	// primary worker-bound account.
 	if err := c.ensureAccountQueried(); err != nil {
 		return nil, err
 	}
 
-	// Get current sequence and increment atomically
-	seq := atomic.AddUint64(&c.sequence, 1) - 1
+	// Compute logical (second, j) indices for this connection using a
+	// monotonically increasing per-connection counter.
+	counter := atomic.AddUint64(&c.txCounter, 1) - 1
+	rate := c.perConnectionRate
+	if rate <= 0 {
+		rate = c.config.Rate
+	}
+	t := counter / uint64(rate)
+	j := int(counter % uint64(rate))
 
-	// Build transaction using strategy
+	senderIdx, receiverIdx := c.senderReceiverIndices(t, j)
+
+	if c.config.Debug.LogWorkerIDs {
+		fmt.Printf("bank tx sender=%d receiver=%d (conn=%d)\n", senderIdx, receiverIdx, c.connectionIndex)
+	}
+
+	var (
+		senderPriv cryptotypes.PrivKey
+		senderAddr sdk.AccAddress
+		seq        uint64
+		accountNum uint64
+	)
+
+	// If the sender index matches this client's worker index, use the local
+	// account metadata; otherwise, use a bench-derived sender.
+	if senderIdx == c.workerIndex {
+		senderPriv = c.privKey
+		senderAddr = c.addr
+		accountNum = c.accountNum
+		seq = atomic.AddUint64(&c.sequence, 1) - 1
+	} else {
+		sender, err := getOrInitBenchSender(senderIdx, c.restURL)
+		if err != nil {
+			return nil, err
+		}
+		senderPriv = sender.priv
+		senderAddr = sender.addr
+		accountNum = sender.accountNum
+		seq = atomic.AddUint64(&sender.seq, 1) - 1
+	}
+
+	toAddr := getBenchAddress(receiverIdx)
+
+	// Build transaction using strategy, explicitly specifying sender and
+	// receiver addresses.
 	txBuilder := c.encCfg.TxConfig.NewTxBuilder()
 
-	// Create bank send message
-	msg, err := c.strategy.CreateMsg(c.addr.String())
+	msg, err := c.strategy.CreateMsgTo(senderAddr.String(), toAddr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create message: %w", err)
 	}
@@ -217,7 +355,7 @@ func (c *PerpxBankClient) GenerateTx() ([]byte, error) {
 
 	// First round: set empty signatures to gather signer infos (required for SIGN_MODE_DIRECT)
 	sigV2Empty := signing.SignatureV2{
-		PubKey: c.privKey.PubKey(),
+		PubKey: senderPriv.PubKey(),
 		Data: &signing.SingleSignatureData{
 			SignMode:  signing.SignMode_SIGN_MODE_DIRECT,
 			Signature: nil,
@@ -230,11 +368,11 @@ func (c *PerpxBankClient) GenerateTx() ([]byte, error) {
 
 	// Second round: actually sign the transaction
 	signerData := authsigning.SignerData{
-		Address:       c.addr.String(),
+		Address:       senderAddr.String(),
 		ChainID:       c.strategy.ChainID(),
-		AccountNumber: c.accountNum,
+		AccountNumber: accountNum,
 		Sequence:      seq,
-		PubKey:        c.privKey.PubKey(),
+		PubKey:        senderPriv.PubKey(),
 	}
 
 	sigV2, err := tx.SignWithPrivKey(
@@ -242,7 +380,7 @@ func (c *PerpxBankClient) GenerateTx() ([]byte, error) {
 		signing.SignMode_SIGN_MODE_DIRECT,
 		signerData,
 		txBuilder,
-		c.privKey,
+		senderPriv,
 		c.encCfg.TxConfig,
 		seq,
 	)
@@ -261,6 +399,202 @@ func (c *PerpxBankClient) GenerateTx() ([]byte, error) {
 	}
 
 	return txBytes, nil
+}
+
+// GenerateTxWithSequence generates a bank send transaction using the current
+// sender/receiver schedule, but WITHOUT advancing the sender's sequence. This
+// allows the transactor (broadcast_tx_sync) to advance sequence only after
+// successful CheckTx.
+func (c *PerpxBankClient) GenerateTxWithSequence() ([]byte, uint64, error) {
+	// Ensure primary account is initialized (needed when senderIdx == workerIndex).
+	if err := c.ensureAccountQueried(); err != nil {
+		return nil, 0, err
+	}
+
+	// Derive (t, j) from a monotonically increasing counter, same as GenerateTx.
+	counter := atomic.AddUint64(&c.txCounter, 1) - 1
+	rate := c.perConnectionRate
+	if rate <= 0 {
+		rate = c.config.Rate
+	}
+	t := counter / uint64(rate)
+	j := int(counter % uint64(rate))
+
+	senderIdx, receiverIdx := c.senderReceiverIndices(t, j)
+
+	if c.config.Debug.LogWorkerIDs {
+		fmt.Printf("bank sequenced tx sender=%d receiver=%d (conn=%d)\n", senderIdx, receiverIdx, c.connectionIndex)
+	}
+
+	var (
+		senderPriv cryptotypes.PrivKey
+		senderAddr sdk.AccAddress
+		seq        uint64
+		accountNum uint64
+		bench      *benchSender
+	)
+
+	if senderIdx == c.workerIndex {
+		senderPriv = c.privKey
+		senderAddr = c.addr
+		accountNum = c.accountNum
+		seq = atomic.LoadUint64(&c.sequence)
+	} else {
+		s, err := getOrInitBenchSender(senderIdx, c.restURL)
+		if err != nil {
+			return nil, 0, err
+		}
+		bench = s
+		senderPriv = s.priv
+		senderAddr = s.addr
+		accountNum = s.accountNum
+		seq = atomic.LoadUint64(&s.seq)
+	}
+
+	// Record last sender for CommitSequence / recovery.
+	c.lastSenderMtx.Lock()
+	c.lastSenderIdx = senderIdx
+	c.lastBench = bench
+	c.lastSenderMtx.Unlock()
+
+	toAddr := getBenchAddress(receiverIdx)
+	txBuilder := c.encCfg.TxConfig.NewTxBuilder()
+	msg, err := c.strategy.CreateMsgTo(senderAddr.String(), toAddr)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to create message: %w", err)
+	}
+	if err := txBuilder.SetMsgs(msg); err != nil {
+		return nil, 0, fmt.Errorf("failed to set message: %w", err)
+	}
+
+	// Fees (same as GenerateTx)
+	gasLimit := uint64(200000)
+	minGasPrice := math.NewInt(25000000000)
+	feeAmount := minGasPrice.Mul(math.NewInt(int64(gasLimit)))
+	feeCoins := sdk.NewCoins(sdk.NewCoin(c.strategy.Denom(), feeAmount))
+	txBuilder.SetFeeAmount(feeCoins)
+	txBuilder.SetGasLimit(gasLimit)
+
+	sigV2Empty := signing.SignatureV2{
+		PubKey: senderPriv.PubKey(),
+		Data: &signing.SingleSignatureData{
+			SignMode:  signing.SignMode_SIGN_MODE_DIRECT,
+			Signature: nil,
+		},
+		Sequence: seq,
+	}
+	if err := txBuilder.SetSignatures(sigV2Empty); err != nil {
+		return nil, 0, fmt.Errorf("failed to set empty signature: %w", err)
+	}
+
+	signerData := authsigning.SignerData{
+		Address:       senderAddr.String(),
+		ChainID:       c.strategy.ChainID(),
+		AccountNumber: accountNum,
+		Sequence:      seq,
+		PubKey:        senderPriv.PubKey(),
+	}
+	sigV2, err := tx.SignWithPrivKey(
+		context.Background(),
+		signing.SignMode_SIGN_MODE_DIRECT,
+		signerData,
+		txBuilder,
+		senderPriv,
+		c.encCfg.TxConfig,
+		seq,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to sign: %w", err)
+	}
+	if err := txBuilder.SetSignatures(sigV2); err != nil {
+		return nil, 0, fmt.Errorf("failed to set signature: %w", err)
+	}
+
+	txBytes, err := c.encCfg.TxConfig.TxEncoder()(txBuilder.GetTx())
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to encode transaction: %w", err)
+	}
+	return txBytes, seq, nil
+}
+
+// CommitSequence advances the sequence for the sender account that produced the
+// most recently generated sequenced tx.
+func (c *PerpxBankClient) CommitSequence(next uint64) {
+	if next == 0 {
+		return
+	}
+	c.lastSenderMtx.Lock()
+	senderIdx := c.lastSenderIdx
+	bench := c.lastBench
+	c.lastSenderMtx.Unlock()
+
+	if senderIdx == c.workerIndex || bench == nil {
+		// Primary sender (client-bound account).
+		for {
+			cur := atomic.LoadUint64(&c.sequence)
+			if next <= cur {
+				return
+			}
+			if atomic.CompareAndSwapUint64(&c.sequence, cur, next) {
+				return
+			}
+		}
+	}
+
+	// Bench-derived sender.
+	for {
+		cur := atomic.LoadUint64(&bench.seq)
+		if next <= cur {
+			return
+		}
+		if atomic.CompareAndSwapUint64(&bench.seq, cur, next) {
+			return
+		}
+	}
+}
+
+// RecoverSequence re-queries the on-chain sequence for the last sender and
+// resets the local sequence accordingly.
+func (c *PerpxBankClient) RecoverSequence() error {
+	c.lastSenderMtx.Lock()
+	senderIdx := c.lastSenderIdx
+	bench := c.lastBench
+	c.lastSenderMtx.Unlock()
+
+	if senderIdx == c.workerIndex || bench == nil {
+		info, err := QueryAccountInfo(c.restURL, c.addr.String(), sharedHTTPClient)
+		if err != nil {
+			return err
+		}
+		atomic.StoreUint64(&c.sequence, info.Sequence)
+		return nil
+	}
+
+	info, err := QueryAccountInfo(c.restURL, bench.addr.String(), sharedHTTPClient)
+	if err != nil {
+		return err
+	}
+	atomic.StoreUint64(&bench.seq, info.Sequence)
+	return nil
+}
+
+// RecoverSequenceTo resets the local sequence for the last sender to a specific
+// target value (typically the "expected" value from a CheckTx mismatch).
+func (c *PerpxBankClient) RecoverSequenceTo(next uint64) error {
+	if next == 0 {
+		return nil
+	}
+	c.lastSenderMtx.Lock()
+	senderIdx := c.lastSenderIdx
+	bench := c.lastBench
+	c.lastSenderMtx.Unlock()
+
+	if senderIdx == c.workerIndex || bench == nil {
+		atomic.StoreUint64(&c.sequence, next)
+		return nil
+	}
+	atomic.StoreUint64(&bench.seq, next)
+	return nil
 }
 
 // convertWebSocketToHTTP converts ws://host:port/path to http://host:port

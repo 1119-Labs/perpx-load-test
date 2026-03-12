@@ -409,12 +409,25 @@ func (c *Coordinator) logTestingProgress(completed int) {
 
 	// if we're done and we need to write aggregate statistics
 	if completed >= c.coordCfg.ExpectWorkers && len(c.cfg.StatsOutputFile) > 0 {
-		stats := AggregateStats{
+		totalStats := AggregateStats{
 			TotalTxs:         totalTxs,
 			TotalTimeSeconds: overallElapsed,
 			TotalBytes:       totalBytes,
 		}
-		if err := writeAggregateStats(c.cfg.StatsOutputFile, stats); err != nil {
+
+		// Build per-worker aggregates using the same elapsed time window. This
+		// keeps the CSV extensible while preserving the original aggregate rows.
+		perWorker := make(map[string]AggregateStats, len(c.totalTxsPerWorker))
+		for id, wTxs := range c.totalTxsPerWorker {
+			wBytes := c.totalBytesPerWorker[id]
+			perWorker[id] = AggregateStats{
+				TotalTxs:         wTxs,
+				TotalTimeSeconds: overallElapsed,
+				TotalBytes:       wBytes,
+			}
+		}
+
+		if err := writeAggregateAndPerWorkerStats(c.cfg.StatsOutputFile, totalStats, perWorker); err != nil {
 			c.logger.Error("Failed to write aggregate statistics", "err", err)
 		}
 	}

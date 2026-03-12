@@ -48,8 +48,22 @@ func ExecuteStandalone(cfg Config) error {
 	tg := NewTransactorGroup()
 	tg.SetLogger(logger)
 	if err := tg.AddAll(&cfg); err != nil {
+		if tuiMode {
+			fmt.Fprintln(os.Stderr, "Failed to connect:", err.Error())
+		}
 		return err
 	}
+
+	// At this point all websocket connections have been successfully established.
+	totalEndpoints := len(cfg.Endpoints)
+	totalConnections := cfg.Connections * totalEndpoints
+	logger.Info(
+		"All WebSocket connections established",
+		"endpoints", totalEndpoints,
+		"connections_per_endpoint", cfg.Connections,
+		"total_connections", totalConnections,
+	)
+
 	logger.Info("Initiating load test")
 	tg.Start()
 

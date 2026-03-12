@@ -8,12 +8,14 @@
 #   ./scripts/run_benchmark.sh [OPTIONS]
 #
 # Options:
-#   --workers N            Number of workers (default: 10)
+#   --workers N            Number of logical workers to seed / drive load (default: 10)
+#   --connections N        Connections per endpoint for the benchmark client (-c, default: same as --workers)
 #   --duration N           Duration in seconds (default: 30)
-#   --rate N               Transactions per second per worker (default: 50)
+#   --rate N               Transactions per second per connection (default: 50)
 #   --skip-seed            Skip account seeding (assumes already seeded)
 #   --skip-build           Skip building the binary (assumes already built)
 #   --output-dir DIR       Output directory for results (default: ./exported)
+#   --config PATH          Path to YAML config file (seed + loadtest sections; overlays env, flags override)
 #   --help                 Show this help message
 # ============================================================================
 
@@ -31,26 +33,40 @@ BUILD_DIR="${BUILD_DIR:-$REPO_ROOT/bin}"
 BINARY="$BUILD_DIR/perpx-load-test"
 
 # Default values
-WORKERS="${WORKERS:-10}"
+WORKERS="${WORKERS:-10}"               # logical workers / funded accounts dimension (may be overridden by config.seed.workers)
+CONNECTIONS="${CONNECTIONS:-$WORKERS}" # perpx-load-test -c value (per endpoint)
 DURATION="${DURATION:-30}"
-RATE="${RATE:-50}"
+RATE="${RATE:-50}"                     # tx/s per connection
 SKIP_SEED="${SKIP_SEED:-false}"
 SKIP_BUILD="${SKIP_BUILD:-false}"
 OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/exported}"
+CONFIG_FILE="${CONFIG_FILE:-}"
 SEED_PRIVATE_KEY="${SEED_PRIVATE_KEY:-}"
-SEED_KEY="${SEED_KEY:-alice}"
+SEED_KEY="${SEED_KEY:-}"
 QUIET="${QUIET:-true}"
 SHOW_LIVE_LOGS="${SHOW_LIVE_LOGS:-false}"
 UI_MODE="${UI_MODE:-plain}"
 
-# Default configuration (can be overridden via environment variables)
-CHAIN_ID="${CHAIN_ID:-localperpxprotocol}"
-RPC_URL="${RPC_URL:-http://localhost:36657}"
+# Track which params were explicitly set via CLI so we can honor precedence
+# CLI > config file > environment > defaults.
+RATE_EXPLICIT="${RATE_EXPLICIT:-false}"
+WORKERS_EXPLICIT="${WORKERS_EXPLICIT:-false}"
+CONNECTIONS_EXPLICIT="${CONNECTIONS_EXPLICIT:-false}"
+DURATION_EXPLICIT="${DURATION_EXPLICIT:-false}"
+SEED_KEY_EXPLICIT="${SEED_KEY_EXPLICIT:-false}"
+SEED_PRIVATE_KEY_EXPLICIT="${SEED_PRIVATE_KEY_EXPLICIT:-false}"
+
+# Default configuration (must generally be provided via environment or flags).
+# For non-trivial environments (localnet-dev, staging, CI), prefer:
+#   - .env.localnet-dev (or your own .env)
+#   - explicit LOADTEST_CHAIN_ID / LOADTEST_RPC / WS_URL / WS_ENDPOINTS
+CHAIN_ID="${LOADTEST_CHAIN_ID:-}"
+RPC_URL="${LOADTEST_RPC:-}"
 # Primary WebSocket endpoint (single RPC)
-WS_URL="${WS_URL:-ws://localhost:36657/websocket}"
+WS_URL="${WS_URL:-}"
 # Optional: comma-separated list of WebSocket endpoints for multiple RPCs.
-# If not provided, defaults to WS_URL so existing behavior is preserved.
-WS_ENDPOINTS="${WS_ENDPOINTS:-$WS_URL}"
+# If not provided, we will use WS_URL later once validation passes.
+WS_ENDPOINTS="${WS_ENDPOINTS:-}"
 
 # Colors for output
 COLOR_RESET='\033[0m'
@@ -163,14 +179,16 @@ PerpX Load Test - Automated Load Test Benchmark
 Usage: $0 [OPTIONS]
 
 Options:
-  --workers N            Number of workers (default: 10)
+  --workers N            Number of logical workers to seed / drive load (default: 10)
+  --connections N        Connections per endpoint for perpx-load-test (-c, default: same as --workers)
   --duration N           Duration in seconds (default: 30)
-  --rate N               Transactions per second per worker (default: 50)
+  --rate N               Transactions per second per connection (default: 50)
   --skip-seed            Skip account seeding (assumes already seeded)
   --skip-build           Skip building the binary (assumes already built)
   --output-dir DIR       Output directory for results (default: ./exported)
+  --config PATH          Path to YAML config file (seed + loadtest sections; overlays env, flags override)
   --seed-private-key KEY  Hex-encoded private key to use for seeding (takes precedence over --seed-key)
-  --seed-key KEY          Key name or mnemonic to use for seeding (default: alice)
+  --seed-key KEY          Key name or mnemonic to use for seeding
   --ws-endpoints LIST     Comma-separated list of WebSocket endpoints for load test (overrides WS_URL for load test only)
   --quiet                Quiet UI (default: on) - shows a simple progress line and writes full logs to a file
   --verbose-logs         Stream full loadtest logs to the terminal (disables quiet UI)
@@ -178,28 +196,30 @@ Options:
   --help                 Show this help message
 
 Environment Variables:
-  WORKERS                Override number of workers
+  WORKERS                Override number of logical workers
+  CONNECTIONS            Override number of connections per endpoint (-c)
   DURATION               Override duration in seconds
-  RATE                   Override transaction rate per worker
+  RATE                   Override transaction rate per connection
   SKIP_SEED              Set to 'true' to skip seeding
   SKIP_BUILD             Set to 'true' to skip building
   OUTPUT_DIR             Override output directory
+  CONFIG_FILE            Path to YAML config file (passed to seed command)
   SEED_PRIVATE_KEY       Hex-encoded private key for seeding (takes precedence over SEED_KEY)
-  SEED_KEY               Key name or mnemonic for seeding (default: alice)
-  CHAIN_ID               Override chain ID (default: localperpxprotocol)
-  RPC_URL                Override RPC endpoint (default: http://localhost:36657)
-  WS_URL                 Override default WebSocket endpoint (default: ws://localhost:36657/websocket)
+  SEED_KEY               Key name or mnemonic for seeding
+  LOADTEST_CHAIN_ID      Chain ID used for signing / seeding
+  LOADTEST_RPC           RPC endpoint used for seeding + /status checks
+  WS_URL                 Default WebSocket endpoint for a single RPC
   WS_ENDPOINTS           Comma-separated list of WebSocket endpoints for load test
   QUIET                  Set to 'true' for quiet UI (default: true)
   SHOW_LIVE_LOGS         Set to 'true' to stream full logs to terminal (default: false)
   UI_MODE                UI mode for perpx-load-test: plain or tui (default: plain)
 
 Examples:
-  # Basic benchmark (10 workers, 30 seconds, 50 TPS per worker)
+  # Basic benchmark (10 workers, 10 connections, 30 seconds, 50 TPS per connection)
   $0
 
-  # Higher load test
-  $0 --workers 20 --duration 60 --rate 100
+  # Higher load test (20 workers, 50 connections)
+  $0 --workers 20 --connections 50 --duration 60 --rate 100
 
   # Skip seeding (accounts already funded)
   $0 --skip-seed
@@ -209,22 +229,34 @@ Examples:
 
   # Custom output directory
   $0 --output-dir ./results
+
+  # Use YAML config file (seed section overlays env; CLI flags still override)
+  $0 --config ./config.yaml
 EOF
 }
 
+main() {
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 		--workers|-w)
 			WORKERS="$2"
+			WORKERS_EXPLICIT="true"
+			shift 2
+			;;
+		--connections)
+			CONNECTIONS="$2"
+			CONNECTIONS_EXPLICIT="true"
 			shift 2
 			;;
 		--duration|-d)
 			DURATION="$2"
+			DURATION_EXPLICIT="true"
 			shift 2
 			;;
 		--rate|-r)
 			RATE="$2"
+			RATE_EXPLICIT="true"
 			shift 2
 			;;
 		--skip-seed)
@@ -239,12 +271,18 @@ while [[ $# -gt 0 ]]; do
 			OUTPUT_DIR="$2"
 			shift 2
 			;;
+		--config)
+			CONFIG_FILE="$2"
+			shift 2
+			;;
 		--seed-private-key|--private-key|-p)
 			SEED_PRIVATE_KEY="$2"
+			SEED_PRIVATE_KEY_EXPLICIT="true"
 			shift 2
 			;;
 		--seed-key|-k)
 			SEED_KEY="$2"
+			SEED_KEY_EXPLICIT="true"
 			shift 2
 			;;
 		--ws-endpoints)
@@ -280,6 +318,68 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ============================================================================
+# Load config-derived defaults (YAML via perpx-load-test config command)
+# ============================================================================
+
+if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
+	if [ ! -x "$BINARY" ]; then
+		log_warning "Binary not found at $BINARY; skipping YAML-derived loadtest config. RPC/WS must come from env or flags."
+	else
+		LOADTEST_VARS=$("$BINARY" config print-loadtest --config "$CONFIG_FILE" 2>/dev/null) || true
+		if [ -n "$LOADTEST_VARS" ]; then
+			while IFS= read -r line; do
+				case "$line" in
+					RATE=*)
+						[ "$RATE_EXPLICIT" != "true" ] && eval "$line"
+						;;
+					CONNECTIONS=*)
+						[ "$CONNECTIONS_EXPLICIT" != "true" ] && eval "$line"
+						;;
+					DURATION=*)
+						[ "$DURATION_EXPLICIT" != "true" ] && eval "$line"
+						;;
+					REST_URL=*)
+						# Always accept REST_URL from config; we map it to LOADTEST_REST_URL below.
+						eval "$line"
+						;;
+					WS_URL=*)
+						# Only take WS_URL from config when caller didn't set WS_URL already.
+						[ -z "$WS_URL" ] && eval "$line"
+						;;
+					RPC_URL=*)
+						# Only take RPC_URL from config when LOADTEST_RPC/env wasn't set.
+						[ -z "$RPC_URL" ] && eval "$line"
+						;;
+					CHAIN_ID=*)
+						# Honor CHAIN_ID from config when LOADTEST_CHAIN_ID/env wasn't set.
+						[ -z "$CHAIN_ID" ] && eval "$line"
+						;;
+					SEED_WORKERS=*)
+						# Capture SEED_WORKERS from config; we may map it to WORKERS below.
+						eval "$line"
+						;;
+				esac
+			done <<EOF
+$LOADTEST_VARS
+EOF
+			# If config provided a REST_URL and caller didn't explicitly set LOADTEST_REST_URL,
+			# export it so envconfig.DeriveRESTBase() will honor the YAML restUrl.
+			if [ -z "${LOADTEST_REST_URL:-}" ] && [ -n "${REST_URL:-}" ]; then
+				export LOADTEST_REST_URL="$REST_URL"
+			fi
+		fi
+	fi
+fi
+
+# If the config provided SEED_WORKERS (from seed.workers) and the caller did not
+# explicitly set WORKERS via CLI, align WORKERS with the YAML so that seeding,
+# funding, and summary reporting match the actual seeded worker set used by the
+# loadtest binary's worker-sharding logic.
+if [ "$WORKERS_EXPLICIT" != "true" ] && [ -n "${SEED_WORKERS:-}" ]; then
+	WORKERS="$SEED_WORKERS"
+fi
+
+# ============================================================================
 # Validation
 # ============================================================================
 
@@ -290,6 +390,27 @@ for cmd in curl jq go; do
 		exit 1
 	fi
 done
+
+# Require basic network identity to be configured via env or flags.
+if [ -z "$RPC_URL" ]; then
+	log_error "LOADTEST_RPC is not set. Please configure it via environment (e.g. .env.localnet-dev) before running this script."
+	exit 1
+fi
+if [ -z "$CHAIN_ID" ]; then
+	log_warning "CHAIN_ID is not set; defaulting to value returned by RPC /status"
+	CHAIN_ID="$(curl -s "$RPC_URL/status" | jq -r '.result.node_info.network // empty')"
+	if [ -z "$CHAIN_ID" ] || [ "$CHAIN_ID" = "null" ]; then
+		log_error "Failed to infer CHAIN_ID from $RPC_URL/status; please set LOADTEST_CHAIN_ID explicitly (e.g. via .env.localnet-dev)."
+		exit 1
+	fi
+fi
+if [ -z "$WS_ENDPOINTS" ] && [ -z "$WS_URL" ]; then
+	log_error "Neither WS_ENDPOINTS nor WS_URL is set. Please configure at least one WebSocket endpoint."
+	exit 1
+fi
+if [ -z "$WS_ENDPOINTS" ] && [ -n "$WS_URL" ]; then
+	WS_ENDPOINTS="$WS_URL"
+fi
 
 # Detect a timeout command (GNU coreutils `timeout` or Homebrew `gtimeout` on macOS).
 # If none is available, we will run benchmarks without an external timeout wrapper.
@@ -360,6 +481,89 @@ log_info "Current block height: $CURRENT_HEIGHT"
 ENDPOINT_COUNT="$(count_ws_endpoints "$WS_ENDPOINTS")"
 if [ -z "$ENDPOINT_COUNT" ] || [ "$ENDPOINT_COUNT" -lt 1 ]; then
 	ENDPOINT_COUNT=1
+fi
+
+# If the user did not explicitly set CONNECTIONS, default it to WORKERS so
+# behavior matches older versions of this script and aligns with
+# scripts/run_perps_load.sh terminology (workers vs connections).
+if [ -z "${CONNECTIONS}" ]; then
+	CONNECTIONS="$WORKERS"
+fi
+
+# Pre-compute attempted TPS/txs so both seeding and reporting can share the same values.
+ATTEMPTED_TPS=$((CONNECTIONS * RATE * ENDPOINT_COUNT))
+ATTEMPTED_TXS=$((ATTEMPTED_TPS * DURATION))
+
+# Compute per-run funding requirement per worker and export LOADTEST_FUND_AMOUNT
+# so the seed engine can top up accounts before this run. We use python3 for
+# big integer arithmetic to avoid overflow in shell arithmetic for large runs.
+REQUIRED_PER_WORKER=""
+if command -v python3 >/dev/null 2>&1; then
+	# Ensure the current shell values are visible to python via the environment.
+	# These may have been derived from CLI flags and/or YAML config.
+	export WORKERS CONNECTIONS RATE DURATION
+
+	REQUIRED_PER_WORKER=$(python3 - <<'PY'
+import os
+
+W = int(os.environ.get("WORKERS", "0") or "0")
+C = int(os.environ.get("CONNECTIONS", "0") or "0")
+R = int(os.environ.get("RATE", "0") or "0")
+D = int(os.environ.get("DURATION", "0") or "0")
+
+if C <= 0:
+    C = 1
+W_conn = W // C
+if W_conn <= 0:
+    W_conn = 1
+
+txs_per_conn = R * D
+base_sends_per_worker = (txs_per_conn + W_conn - 1) // W_conn
+max_sends_per_worker = base_sends_per_worker * 2
+
+gas_limit = 200_000
+min_gas_price = 25_000_000_000  # 25e9
+fee_amount = gas_limit * min_gas_price
+per_tx_cost = fee_amount + 1
+
+required = per_tx_cost * max_sends_per_worker
+required = (required * 11) // 10  # +10% margin
+
+print(required)
+PY
+	)
+else
+	# Fallback: best-effort shell arithmetic (may overflow for very large runs).
+	GAS_LIMIT=200000
+	MIN_GAS_PRICE=25000000000  # 25e9
+	FEE_AMOUNT=$((GAS_LIMIT * MIN_GAS_PRICE))  # in base units (aperpx)
+	SEND_AMOUNT=1
+	PER_TX_COST=$((FEE_AMOUNT + SEND_AMOUNT))
+
+	W="$WORKERS"
+	C="$CONNECTIONS"
+	if [ "$C" -le 0 ]; then
+		C=1
+	fi
+	W_CONN=$((W / C))
+	if [ "$W_CONN" -le 0 ]; then
+		W_CONN=1
+	fi
+
+	TXS_PER_CONN=$((RATE * DURATION))
+	BASE_SENDS_PER_WORKER=$(( (TXS_PER_CONN + W_CONN - 1) / W_CONN ))  # ceil
+	SAFETY_FACTOR_NUM=2
+	MAX_SENDS_PER_WORKER=$((BASE_SENDS_PER_WORKER * SAFETY_FACTOR_NUM))
+
+	REQUIRED_PER_WORKER=$((PER_TX_COST * MAX_SENDS_PER_WORKER))
+	REQUIRED_PER_WORKER=$(((REQUIRED_PER_WORKER * 11) / 10))
+fi
+
+if [ -n "$REQUIRED_PER_WORKER" ]; then
+	export LOADTEST_FUND_AMOUNT="${REQUIRED_PER_WORKER}${LOADTEST_DENOM:-aperpx}"
+	log_info "Computed fund amount per worker for this run: $LOADTEST_FUND_AMOUNT"
+else
+	log_warning "Failed to compute dynamic LOADTEST_FUND_AMOUNT; falling back to existing/default value"
 fi
 
 # ============================================================================
@@ -481,29 +685,41 @@ SEED_LOG_FILE="$OUTPUT_DIR/loadtest-seed-${TIMESTAMP}.log"
 
 if [ "$SKIP_SEED" != "true" ]; then
 	log_info "Seeding benchmark accounts..."
-	# NOTE: perpx-load-test uses -c as "connections per endpoint". With multiple endpoints,
-	# the total number of distinct accounts needed is WORKERS * ENDPOINT_COUNT.
-	SEED_WORKERS=$((WORKERS * ENDPOINT_COUNT))
-	log_info "  Connections per endpoint (-c): $WORKERS"
+	# When a YAML config is provided, prefer seed.workers from that config
+	# (surfaced as SEED_WORKERS by `perpx-load-test config print-loadtest`) so
+	# that the seeded worker set matches the worker-sharding math used by the
+	# loadtest client. Fallback: legacy behavior of WORKERS * ENDPOINT_COUNT.
+	if [ -n "${SEED_WORKERS:-}" ]; then
+		SEED_WORKERS_TOTAL="$SEED_WORKERS"
+	else
+		SEED_WORKERS_TOTAL=$((WORKERS * ENDPOINT_COUNT))
+	fi
+	log_info "  Workers (logical): $WORKERS"
+	log_info "  Connections per endpoint (-c): $CONNECTIONS"
 	log_info "  Endpoints: $ENDPOINT_COUNT"
-	log_info "  Accounts to seed: $SEED_WORKERS"
+	log_info "  Accounts to seed: $SEED_WORKERS_TOTAL"
 	log_info "  Chain ID: $CHAIN_ID"
 	log_info "  RPC: $RPC_URL"
-	
 	# Build seed command arguments
 	SEED_ARGS=(
-		--workers "$SEED_WORKERS"
+		--workers "$SEED_WORKERS_TOTAL"
 		--rpc "$RPC_URL"
 		--chain-id "$CHAIN_ID"
 	)
+	if [ -n "$CONFIG_FILE" ]; then
+		SEED_ARGS+=(--config "$CONFIG_FILE")
+	fi
 	
-	# Add private key if provided (takes precedence)
-	if [ -n "$SEED_PRIVATE_KEY" ]; then
+	# Pass seed key/private key only when explicitly set by user. When --config is used
+	# and neither was set, let the config file's seed.seedKey / seed.seedPrivateKey apply.
+	if [ "$SEED_PRIVATE_KEY_EXPLICIT" = "true" ] && [ -n "$SEED_PRIVATE_KEY" ]; then
 		log_info "  Using private key for seeding"
 		SEED_ARGS+=(--seed-private-key "$SEED_PRIVATE_KEY")
-	else
+	elif [ "$SEED_KEY_EXPLICIT" = "true" ] || [ -z "$CONFIG_FILE" ]; then
 		log_info "  Using seed key: $SEED_KEY"
 		SEED_ARGS+=(--seed-key "$SEED_KEY")
+	else
+		log_info "  Using seed key from config file"
 	fi
 	
 	if [ "$UI_MODE" = "tui" ]; then
@@ -527,15 +743,17 @@ fi
 # ============================================================================
 
 log_info "Starting TPS benchmark..."
-log_info "  Connections per endpoint (-c): $WORKERS"
+log_info "  Workers (logical): $WORKERS"
+log_info "  Connections per endpoint (-c): $CONNECTIONS"
 log_info "  Endpoints: $ENDPOINT_COUNT"
 log_info "  Duration: ${DURATION}s"
-log_info "  Rate: $RATE TPS per connection (total attempted: $((WORKERS * RATE * ENDPOINT_COUNT)) TPS)"
+log_info "  Rate: $RATE TPS per connection (total attempted: $((CONNECTIONS * RATE * ENDPOINT_COUNT)) TPS)"
 log_info "  Chain ID: $CHAIN_ID"
 log_info "  WebSocket endpoints: $WS_ENDPOINTS"
 
-# Calculate total expected transactions (attempted)
-TOTAL_EXPECTED=$((WORKERS * RATE * ENDPOINT_COUNT * DURATION))
+# Calculate total expected transactions (attempted). ATTEMPTED_TPS/ATTEMPTED_TXS were
+# precomputed earlier so that seeding and reporting share consistent values.
+TOTAL_EXPECTED=$ATTEMPTED_TXS
 
 log_warning "Note: If you see 'connection reset' errors, increase ulimit: ulimit -n 4096"
 echo ""
@@ -550,11 +768,15 @@ export LOADTEST_DENOM="${LOADTEST_DENOM:-aperpx}"
 
 # Run the benchmark and capture output
 log_info "Running benchmark command..."
-log_info "  Command: $BINARY --ui $UI_MODE -c $WORKERS -T $DURATION -r $RATE -s 250 --broadcast-tx-method async --endpoints $WS_ENDPOINTS --stats-output $OUTPUT_FILE"
+log_info "  Command: $BINARY --ui $UI_MODE -c $CONNECTIONS -T $DURATION -r $RATE -s 250 --broadcast-tx-method async --endpoints $WS_ENDPOINTS --stats-output $OUTPUT_FILE"
 log_info "  Logs: $LOG_FILE"
 
-# Run with timeout to prevent infinite hanging (if timeout command is available)
-TIMEOUT_DURATION=$((DURATION + 60))
+# Run with timeout to prevent infinite hanging (if timeout command is available).
+# Connection setup scales with connection count; add buffer (1s per 50 connections, cap 20 min).
+TOTAL_CONNS=$((CONNECTIONS * ENDPOINT_COUNT))
+CONN_BUFFER=$((TOTAL_CONNS / 50))
+[ "$CONN_BUFFER" -gt 1200 ] && CONN_BUFFER=1200
+TIMEOUT_DURATION=$((DURATION + 120 + CONN_BUFFER))
 
 if [ "$UI_MODE" = "tui" ]; then
 	# Full-screen TUI: run in foreground with stdout attached to terminal.
@@ -577,7 +799,7 @@ if [ "$UI_MODE" = "tui" ]; then
 	if [ -n "$TIMEOUT_CMD" ]; then
 		"$TIMEOUT_CMD" --foreground "$TIMEOUT_DURATION" "$BINARY" \
 			--ui tui \
-			-c "$WORKERS" \
+			-c "$CONNECTIONS" \
 			-T "$DURATION" \
 			-r "$RATE" \
 			-s 250 \
@@ -588,7 +810,7 @@ if [ "$UI_MODE" = "tui" ]; then
 	else
 		"$BINARY" \
 			--ui tui \
-			-c "$WORKERS" \
+			-c "$CONNECTIONS" \
 			-T "$DURATION" \
 			-r "$RATE" \
 			-s 250 \
@@ -613,7 +835,7 @@ elif [ "$QUIET" = "true" ] && [ "$SHOW_LIVE_LOGS" != "true" ]; then
 	if [ -n "$TIMEOUT_CMD" ]; then
 		( "$TIMEOUT_CMD" "$TIMEOUT_DURATION" "$BINARY" \
 			--ui "$UI_MODE" \
-			-c "$WORKERS" \
+			-c "$CONNECTIONS" \
 			-T "$DURATION" \
 			-r "$RATE" \
 			-s 250 \
@@ -623,7 +845,7 @@ elif [ "$QUIET" = "true" ] && [ "$SHOW_LIVE_LOGS" != "true" ]; then
 	else
 		( "$BINARY" \
 			--ui "$UI_MODE" \
-			-c "$WORKERS" \
+			-c "$CONNECTIONS" \
 			-T "$DURATION" \
 			-r "$RATE" \
 			-s 250 \
@@ -652,7 +874,7 @@ else
 	if [ -n "$TIMEOUT_CMD" ]; then
 		"$TIMEOUT_CMD" "$TIMEOUT_DURATION" "$BINARY" \
 			--ui "$UI_MODE" \
-			-c "$WORKERS" \
+			-c "$CONNECTIONS" \
 			-T "$DURATION" \
 			-r "$RATE" \
 			-s 250 \
@@ -663,7 +885,7 @@ else
 	else
 		"$BINARY" \
 			--ui "$UI_MODE" \
-			-c "$WORKERS" \
+			-c "$CONNECTIONS" \
 			-T "$DURATION" \
 			-r "$RATE" \
 			-s 250 \
@@ -711,11 +933,20 @@ echo "=========================================="
 echo "Benchmark Summary"
 echo "=========================================="
 echo "Configuration:"
-echo "  Connections/EP:    $WORKERS"
+TOTAL_CONNS=$((CONNECTIONS * ENDPOINT_COUNT))
+WORKERS_PER_CONN="N/A"
+if [ "$TOTAL_CONNS" -gt 0 ] 2>/dev/null && [ "$WORKERS" -gt 0 ] 2>/dev/null; then
+	if [ $((WORKERS % TOTAL_CONNS)) -eq 0 ] 2>/dev/null; then
+		WORKERS_PER_CONN=$((WORKERS / TOTAL_CONNS))
+	fi
+fi
+echo "  Connections/EP:    $CONNECTIONS"
 echo "  Endpoints:         $ENDPOINT_COUNT"
+echo "  Total connections: $TOTAL_CONNS"
+echo "  Workers/connection G: $WORKERS_PER_CONN"
 echo "  Duration:          ${DURATION}s"
 echo "  Rate per conn:     $RATE TPS"
-echo "  Total attempted:   $((WORKERS * RATE * ENDPOINT_COUNT)) TPS"
+echo "  Total attempted:   ${ATTEMPTED_TPS} TPS"
 echo ""
 echo "Execution:"
 echo "  Start height:      $START_HEIGHT"
@@ -731,8 +962,7 @@ TOTAL_BYTES="0"
 AVG_TX_RATE="0"
 AVG_DATA_RATE="0"
 AVG_TX_SIZE="0"
-ATTEMPTED_TPS=$((WORKERS * RATE * ENDPOINT_COUNT))
-ATTEMPTED_TXS=$((ATTEMPTED_TPS * DURATION))
+# ATTEMPTED_TPS/ATTEMPTED_TXS were computed earlier for both seeding and reporting.
 BLOCKS_PROCESSED=$((END_HEIGHT - START_HEIGHT))
 AVG_BLOCK_TIME="0"
 TXS_PER_BLOCK="0"
@@ -746,6 +976,9 @@ if [ -f "$OUTPUT_FILE" ]; then
 	AVG_DATA_RATE=$(grep "avg_data_rate" "$OUTPUT_FILE" | cut -d',' -f2 || echo "0")
 	AVG_TX_SIZE=$(grep "avg_tx_size" "$OUTPUT_FILE" | cut -d',' -f2 || echo "0")
 
+	# Observed seconds per block = benchmark duration / blocks in that window.
+	# This is NOT the chain's configured block interval (e.g. CometBFT timeout).
+	# With few blocks and long duration it can be large; with many blocks it approximates real block time.
 	if [ "$BLOCKS_PROCESSED" -gt 0 ]; then
 		AVG_BLOCK_TIME=$(awk "BEGIN {printf \"%.3f\", $TOTAL_TIME / $BLOCKS_PROCESSED}")
 		TXS_PER_BLOCK=$(awk "BEGIN {printf \"%.2f\", $TOTAL_TXS / $BLOCKS_PROCESSED}")
@@ -763,7 +996,7 @@ if [ -f "$OUTPUT_FILE" ]; then
 	echo "  avg_data_rate:     $AVG_DATA_RATE bytes per second"
 	echo "  avg_tx_size:       $AVG_TX_SIZE bytes per transaction"
 	echo "  actual_tps:        $AVG_TX_RATE (vs attempted $ATTEMPTED_TPS TPS, $EFFICIENCY% achieved)"
-	echo "  avg_block_time:    ${AVG_BLOCK_TIME}s (over $BLOCKS_PROCESSED blocks)"
+	echo "  observed_sec_per_block: ${AVG_BLOCK_TIME}s (total_time ÷ $BLOCKS_PROCESSED blocks)"
 	echo "  txs_per_block:     $TXS_PER_BLOCK"
 	echo ""
 fi
@@ -777,7 +1010,7 @@ if command -v jq &> /dev/null && [ -f "$OUTPUT_FILE" ]; then
 	log_success "$RESULT_LINE"
 	echo "$RESULT_LINE" >>"$LOG_FILE" 2>/dev/null || true
 	
-	jq -n \
+		jq -n \
 		--arg chain_id "$CHAIN_ID" \
 		--arg rpc_url "$RPC_URL" \
 		--arg ws_url "$WS_URL" \
@@ -811,8 +1044,8 @@ if command -v jq &> /dev/null && [ -f "$OUTPUT_FILE" ]; then
 				endpoints_count: $endpoints_count,
 				duration_seconds: $duration,
 				rate_per_worker: $rate,
-				total_attempted_tps: ($workers * $rate * $endpoints_count),
-				total_attempted_txs: ($workers * $rate * $endpoints_count * $duration)
+				total_attempted_tps: ($attempted_tps | tonumber),
+				total_attempted_txs: ($attempted_txs | tonumber)
 			},
 			execution: {
 				start_height: $start_height,
@@ -855,4 +1088,6 @@ log_success "Results saved to:"
 echo "  CSV: $OUTPUT_FILE"
 [ -f "$JSON_OUTPUT" ] && echo "  JSON: $JSON_OUTPUT"
 echo ""
+}
 
+main "$@"

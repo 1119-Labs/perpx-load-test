@@ -20,6 +20,24 @@ type Client interface {
 	GenerateTx() ([]byte, error)
 }
 
+// SequenceRecoverer is an optional interface that a Client may implement to
+// support recovering its local account metadata (account number/sequence) from
+// the chain after CheckTx sequence mismatches or auth-related errors.
+//
+// Implementations should be safe to call between GenerateTx() calls.
+type SequenceRecoverer interface {
+	RecoverSequence() error
+}
+
+// SequenceRecovererTo is an optional interface that allows a Client to recover
+// its local sequence to a specific value (typically the "expected" sequence
+// returned by a CheckTx sequence-mismatch error). This is more precise than
+// re-querying via REST, because REST reflects committed state, while CheckTx
+// "expected" reflects mempool state (including pending txs).
+type SequenceRecovererTo interface {
+	RecoverSequenceTo(next uint64) error
+}
+
 // Our global registry of client factories
 var clientFactories = map[string]ClientFactory{}
 
