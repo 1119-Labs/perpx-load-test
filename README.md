@@ -661,6 +661,55 @@ This ensures:
 - **Predictability**: Easy to identify which account belongs to which worker
 - **Consistency**: Seed command and load test use the same generation logic
 
+### Worker Sharding & Connection Scheduling
+
+Add an explicit **worker-sharding layer** between seeding and the load test engine so that large worker sets are actually exercised during runs.
+
+- **Seeded workers**: The `seed.workers` value in the YAML config (or `--workers` in scripts) determines the total number of bench accounts \(W = WorkersTotal\).
+- **Connections and endpoints**: The loadtest config specifies:
+  - `connections` per endpoint \(C\)
+  - `endpoints` list \(E = len(endpoints)\)
+- **Workers per connection**: At config load time (`ConfigFromViper`), the engine derives:
+  - `WorkersTotal = seed.workers` (when present in the same YAML file)
+  - `WorkersPerConnection = WorkersTotal / (E * C)` (integer division; if this is 0, sharding is disabled)
+
+For each connection, the load test constructs a per-connection view of the config with:
+
+- `EndpointOrdinal` – 0-based index into `endpoints`
+- `TransactorIndex` – 0-based connection index within that endpoint
+
+These two fields are used by the client factories to select **which slice of the worker pool each connection owns**:
+
+- **Bank (`perpx-bank`)**:
+  - Connection index: `globalConnIndex = EndpointOrdinal * Connections + TransactorIndex`
+  - Worker group base: `workerBase = globalConnIndex * WorkersPerConnection`
+  - This connection drives senders in `\[workerBase .. workerBase + WorkersPerConnection - 1]`.
+  - Within that group, every tick chooses **sender / receiver pairs** using a k‑advance rule so that:
+    - For each logical second `t` and per-second index `j`:
+      - `k = (2 * Rate * t) mod G` where `G = WorkersPerConnection`
+      - `sender = connStart + (k + j) mod G`
+      - `receiver = connStart + (k + Rate + j) mod G`
+    - With the validation rule `2*Rate <= WorkersPerConnection`, each sender and receiver are distinct and there are no self-sends.
+- **Perps (`perpx-perps`)**:
+  - When sharding is configured (`WorkersTotal > 0` and `WorkersPerConnection > 0`), the factory builds a `MultiWorkerPerpsClient` per connection.
+  - Each `MultiWorkerPerpsClient` owns `G = WorkersPerConnection` underlying perps workers, with base worker ID:
+    - `endpointBase = EndpointOrdinal * (WorkersTotal / E)`
+    - `connBase = endpointBase + TransactorIndex * WorkersPerConnection`
+  - The perps scheduler uses the same k‑advance idea to rotate **signer accounts per tick**:
+    - For logical slot `n` (0-based), with `R = Rate` and `G = WorkersPerConnection`:
+      - `block = n / R`
+      - `offset = n % R`
+      - `k = (block * 2 * R) mod G`
+      - `workerOffset = (k + offset) mod G`
+    - The selected worker index is `connBase + workerOffset`. Over time, this walks the entire worker group per connection.
+
+**Validation guardrails** (in `loadtest.Config.Validate` when `WorkersTotal > 0`):
+
+- Require at least one endpoint and `connections >= 1`.
+- Require `E * C <= WorkersTotal` so that each connection has at least one funded worker.
+- Derive `workersPerConn = WorkersTotal / (E * C)` and require `workersPerConn > 0`.
+- Enforce `2 * Rate <= workersPerConn` so the bank sender/receiver ranges fit without overlap.
+
 ### Transaction Flow
 
 1. **Client Generation**: Each worker creates a `PerpxBankClient` instance
